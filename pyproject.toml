@@ -1,0 +1,18 @@
+# Solo configuración de herramientas. Las dependencias están en requirements.txt.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/F: errores básicos · I: orden de imports · B: bugs típicos · UP: sintaxis moderna · S: seguridad
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# En los tests usar assert es lo normal.
+"tests/**" = ["S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Permite que los tests importen asistente_ia desde la raíz del proyecto.
+pythonpath = ["."]

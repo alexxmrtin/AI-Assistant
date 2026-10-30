@@ -1,0 +1,21 @@
+# Configuración del asistente, leída de variables de entorno o del fichero .env.
+
+# Se usa pydantic para leer variables de entorno
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    # Lee también el fichero .env e ignora las variables que no aparezcan aquí.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    llm_provider: str = "anthropic"  # anthropic, google u ollama
+    llm_model_fast: str = ""  # vacío = el modelo por defecto del proveedor
+    llm_model_smart: str = ""
+    anthropic_api_key: str = ""
+    google_api_key: str = ""
+    ollama_base_url: str = "http://localhost:11434"
+
+
+# Se lee una sola vez, al importar este fichero, y todo el proyecto usa esta misma variable.
+settings = Settings()
