@@ -10,6 +10,9 @@ langchain-anthropic==1.7.7
 langchain-google-genai==4.4.2
 langchain-ollama==1.1.0
 
+# Orquestación: el grafo del asistente
+langgraph==1.2.18
+
 # Desarrollo
 pytest==9.2.0
 ruff==0.17.3
