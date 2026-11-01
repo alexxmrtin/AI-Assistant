@@ -2,15 +2,15 @@
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # E/F: errores básicos · I: orden de imports · B: bugs típicos · UP: sintaxis moderna · S: seguridad
 select = ["E", "F", "I", "B", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-# En los tests usar assert es lo normal.
-"tests/**" = ["S101"]
+# En los tests es normal usar assert y claves falsas.
+"tests/**" = ["S101", "S106"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

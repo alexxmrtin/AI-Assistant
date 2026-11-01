@@ -13,6 +13,17 @@ langchain-ollama==1.1.0
 # Orquestación: el grafo del asistente
 langgraph==1.2.18
 
+# Trazas: ver cada paso del grafo en Langfuse
+langfuse==5.0.4
+
+# MCP: servidores de herramientas (mcp) y su conexión con LangChain (adaptador)
+mcp==1.30.0
+langchain-mcp-adapters==0.3.2
+
+# Google Calendar: la API (cliente) y el inicio de sesión con Google (OAuth)
+google-api-python-client==2.201.0
+google-auth-oauthlib==1.5.0
+
 # Desarrollo
 pytest==9.2.0
 ruff==0.17.3

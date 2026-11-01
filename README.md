@@ -6,7 +6,7 @@ Asistente personal por Telegram que lee tu calendario y tu correo, propone accio
 
 ### 1.1. Qué hace falta
 
-- Python 3.10 o superior.
+- Python 3.11 o superior (Langfuse no funciona con versiones anteriores).
 - Git.
 
 ### 1.2. Primeros comandos
@@ -83,7 +83,7 @@ Verás tres cosas: la herramienta que pide el modelo con sus argumentos, el resu
 
 ### 3.2. Qué es una herramienta
 
-Un modelo solo sabe lo que aprendió al entrenarse: no conoce tu agenda ni la fecha de hoy. Una herramienta es una función nuestra que el modelo puede pedir que ejecutemos. En `herramientas.py`, `@tool` convierte `list_events` en algo que el modelo puede ver: su nombre, su descripción y sus parámetros con su tipo. El modelo no lee el código de la función, por eso la descripción tiene que explicar bien qué hace y en qué formato van las fechas.
+Un modelo solo sabe lo que aprendió al entrenarse: no conoce tu agenda ni la fecha de hoy. Una herramienta es una función nuestra que el modelo puede pedir que ejecutemos. En `herramientas.py` (desde el paso 7 vive en `mcp_calendar.py`, ver sección 7), `@tool` convierte `list_events` en algo que el modelo puede ver: su nombre, su descripción y sus parámetros con su tipo. El modelo no lee el código de la función, por eso la descripción tiene que explicar bien qué hace y en qué formato van las fechas.
 
 De momento `list_events` lee una agenda inventada (`AGENDA_DE_PRUEBA`). En el paso 7 se mudará a un servidor MCP y en el paso 8 leerá Google Calendar.
 
@@ -107,7 +107,7 @@ Que el modelo solo pueda pedir, y que la ejecución dependa de nuestro código, 
 
 ### 3.5. Tests de este paso
 
-`tests/test_herramientas.py` comprueba que `list_events` devuelve los eventos del jueves, una lista vacía para un día libre y que el rango incluye las dos fechas. No llaman al modelo.
+`tests/test_herramientas.py` (desde el paso 7, `tests/test_mcp_calendar.py`) comprobaba que `list_events` devuelve los eventos del jueves, una lista vacía para un día libre y que el rango incluye las dos fechas. No llaman al modelo.
 
 ## 4. LLM falso para los tests
 
@@ -184,3 +184,121 @@ El checkpointer guarda el estado de cada conversación después de cada nodo. Cu
 
 `tests/test_tool_calling.py` prueba el grafo con el modelo falso: que ejecuta la herramienta y le devuelve el resultado, que responde directamente si no hace falta herramienta, y que recuerda la conversación con el mismo `thread_id`.
 
+## 6. Trazas con Langfuse
+
+### 6.1. Cómo probarlo
+
+1. Crea una cuenta gratuita en [Langfuse Cloud](https://cloud.langfuse.com) y un proyecto.
+2. En el proyecto, ve a Settings → API Keys y crea un par de claves.
+3. Copia `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` y `LANGFUSE_HOST` en tu `.env`. El host aparece junto a las claves, porque depende de la región que elegiste.
+4. `pip install -r requirements.txt` y `python -m asistente_ia`.
+5. Pregunta "¿Qué tengo el jueves?" y abre Traces en Langfuse.
+
+Sin claves, el asistente funciona igual pero no envía nada.
+
+### 6.2. Para qué sirve
+
+Cuando el asistente responde mal, desde fuera solo ves la respuesta. Una traza es el registro de todo lo que pasó por dentro de una petición: qué nodos se ejecutaron y en qué orden, qué mensajes recibió el modelo, qué herramienta pidió y con qué argumentos, qué devolvió, cuánto tardó cada paso y cuántos tokens gastó (y cuánto costó). Es lo que en sistemas se llama observabilidad: como los logs de un servidor, pero pensados para un LLM.
+
+### 6.3. Cómo se conecta: callbacks
+
+LangChain y LangGraph avisan de cada paso que dan a unos objetos llamados *callbacks*. En `trazas.py`, `crear_callbacks()` crea el callback de Langfuse, y en `__main__.py` se le pasa al grafo dentro de `configuracion`. A partir de ahí, cada `grafo.invoke(...)` deja una traza, sin tocar `grafo.py`.
+
+### 6.4. Qué verás en una traza
+
+Un árbol con un elemento por paso: `ingest`, `agent` (dentro, la llamada al modelo con sus mensajes de entrada y salida, tokens y coste), `tools` (la herramienta, sus argumentos y su resultado), otra vez `agent` y `respond`. Cada elemento tiene su duración.
+
+### 6.5. Tests de este paso
+
+`tests/test_trazas.py` comprueba que sin claves no se crea ningún callback y que con claves se crea el de Langfuse. No envían nada a Langfuse.
+
+
+### 6.6. Decisión: Langfuse Cloud solo con datos de prueba
+
+**Decidido el 31-10-2026.** Las trazas se guardan en Langfuse Cloud, pero solo mientras se desarrolla con la agenda de prueba. Cuando el asistente use mis datos reales (calendario, correo), dejo vacías `LANGFUSE_PUBLIC_KEY` y `LANGFUSE_SECRET_KEY` en el `.env`. Así no se envía ninguna traza, porque una traza guarda el contenido completo de cada petición.
+
+El motivo: no quiero mis datos personales en la nube de un proveedor que no conozco bien.
+
+**Si en el futuro lo quiero en local:** Langfuse se puede instalar en mi equipo con Docker Compose, usando el fichero que da Langfuse en su documentación ("Self-hosting"). Levanta 6 contenedores:
+
+- `langfuse-web`: la web y la entrada de trazas.
+- `langfuse-worker`: procesa las trazas en segundo plano.
+- Redis: la cola de trabajo entre web y worker.
+- MinIO: almacén de los datos en bruto.
+- Postgres: usuarios, proyectos y claves.
+- ClickHouse: las trazas, para consultarlas rápido.
+
+El código no cambia. Solo hay que poner `LANGFUSE_HOST=http://localhost:3000` en el `.env` y usar las claves del Langfuse local.
+
+Ojo: aunque no haya trazas, con Claude o Gemini las preguntas siguen pasando por Anthropic o Google. Para que nada salga del equipo, hay que usar también `LLM_PROVIDER=ollama`.
+
+## 7. Servidor MCP del calendario
+
+### 7.1. Cómo probarlo
+
+1. `pip install -r requirements.txt` (hay dos librerías nuevas: `mcp` y `langchain-mcp-adapters`).
+2. `python -m asistente_ia` y pregunta "¿Qué tengo el jueves?". La respuesta es la misma que antes, pero ahora los eventos vienen del servidor MCP.
+3. `pytest` (los tests arrancan el servidor de verdad).
+
+### 7.2. Para qué sirve
+
+MCP (Model Context Protocol) es un estándar para conectar herramientas a una IA, como un USB: el cliente no necesita saber cómo está hecha la herramienta, solo que habla MCP.
+
+- **Servidor MCP** (`mcp_calendar.py`): un programa aparte que ofrece herramientas. Aquí, `list_events`.
+- **Cliente MCP** (`cliente_mcp.py`): nuestro asistente. Pregunta al servidor qué herramientas tiene y las llama cuando el modelo las pide.
+- **Transporte stdio**: el cliente arranca el servidor como un proceso hijo y se hablan por la entrada y salida estándar con mensajes JSON, como una tubería `|` de Linux.
+
+Ventajas: en el paso 8 cambiaremos la agenda de prueba por Google Calendar solo dentro del servidor, sin tocar el grafo; las claves de Google vivirán en el servidor, lejos del modelo; y cualquier otro cliente MCP (por ejemplo Claude Desktop) podría usar el mismo servidor.
+
+El LLM no se conecta al servidor: sigue siendo el tool calling del paso 3. El modelo pide la herramienta, nuestro código se la pide al servidor, el servidor la ejecuta y devuelve el resultado.
+
+### 7.3. Cómo encaja en el código
+
+1. `__main__.py` llama a `cargar_herramientas_mcp()`, que arranca el servidor y trae sus herramientas ya convertidas a herramientas de LangChain (eso lo hace `langchain-mcp-adapters`).
+2. Se las pasa a `crear_grafo(modelo, herramientas)`, que hace `bind_tools` como antes.
+3. En el nodo `tools`, cada llamada se envía al servidor MCP, que ejecuta `list_events` y devuelve el resultado como bloques de texto.
+
+### 7.4. `async` y `asyncio.run`
+
+La librería de MCP es asíncrona: sus funciones (`get_tools`, `ainvoke`) no devuelven el resultado, sino una tarea pendiente, porque hablar con otro programa implica esperar. `asyncio.run(tarea)` ejecuta esa tarea, espera a que termine y devuelve el resultado. Lo usamos solo en dos sitios (`cliente_mcp.py` y el nodo `tools`) para que el resto del código siga siendo normal. Cuando llegue Telegram (paso 9) pasaremos a `async` completo.
+
+### 7.5. Tests de este paso
+
+`tests/test_mcp_calendar.py` prueba `list_events` directamente (tres casos) y el camino completo por MCP: arranca el servidor, trae la herramienta y la llama. `tests/test_tool_calling.py` usa ahora las herramientas del servidor MCP con el LLM falso.
+
+## 8. Google Calendar
+
+### 8.1. Cómo probarlo
+
+1. Crea el proyecto en [Google Cloud](https://console.cloud.google.com): activa la Google Calendar API, configura la pantalla de consentimiento (público Externo, en modo "Prueba", y añade tu Gmail en Público → Usuarios de prueba) y crea un cliente OAuth de tipo "App de escritorio". Descarga su JSON como `secrets/credentials.json`.
+2. `pip install -r requirements.txt`.
+3. Inicia sesión una vez: `python -m asistente_ia.google_calendar`. Se abre el navegador; como la app no está verificada, Google avisa: pulsa "Continuar" (o "Configuración avanzada" → "Ir a Asistente IA") y acepta el permiso. En modo Prueba, repite este paso cada 7 días. Se crea `secrets/token.json`.
+4. En el `.env`, pon `CALENDAR_BACKEND=google`.
+5. `python -m asistente_ia` y pregunta por tus eventos reales.
+
+### 8.2. OAuth: el "iniciar sesión con Google"
+
+El programa nunca ve tu contraseña. Inicias sesión en la página de Google, aceptas el permiso y Google le da al programa un token: una llave limitada que solo sirve para lo que aceptaste. Pedimos `calendar.readonly`, así que con esa llave es imposible crear, cambiar o borrar eventos.
+
+El token tiene dos partes: una llave de acceso que caduca cada hora y un *refresh token* para pedir otra sin volver a abrir el navegador. `cargar_credenciales()` la renueva sola cuando hace falta.
+
+- `secrets/credentials.json`: identifica a la app ante Google.
+- `secrets/token.json`: tu sesión. Quien lo tenga puede leer tu calendario.
+
+Los dos están en `secrets/`, que está en el `.gitignore`.
+
+### 8.3. Decisión: app en modo "Prueba"
+
+**Decidido el 01-11-2026.** Es un proyecto de uso personal: quien quiera usarlo crea su propio proyecto de Google Cloud y su cliente OAuth. Por eso la app se queda en modo "Prueba", con mi cuenta como usuario de prueba, sin rellenar página principal ni política de privacidad.
+
+Consecuencia: en modo Prueba Google caduca el inicio de sesión cada 7 días, y hay que volver a ejecutar `python -m asistente_ia.google_calendar`. Si más adelante molesta (por ejemplo, con el bot y n8n funcionando solos), se puede pasar a "En producción" sin verificar: hay que añadir en Desarrollo de la marca una URL de página principal y otra de política de privacidad. El código no cambia.
+
+### 8.4. Cómo encaja en el código
+
+- `google_calendar.py`: el inicio de sesión (`iniciar_sesion`), la carga del token (`cargar_credenciales`), la petición a Google (`listar_eventos_google`) y la conversión de cada evento al mismo formato que la agenda de prueba (`convertir_evento`).
+- `mcp_calendar.py`: `list_events` mira `CALENDAR_BACKEND` y llama a la agenda de prueba (`demo`) o a Google (`google`).
+- El grafo y el cliente MCP no cambian: no saben de dónde salen los eventos.
+
+### 8.5. Tests de este paso
+
+`tests/test_mcp_calendar.py` prueba `convertir_evento` con eventos de Google escritos a mano (uno con hora y otro de todo el día sin título), sin conectarse a Google. Los tests que arrancan el servidor le fuerzan `CALENDAR_BACKEND=demo`, para que den siempre el mismo resultado aunque tu `.env` diga `google`.

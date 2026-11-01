@@ -2,15 +2,11 @@
 #
 # Cada caja es un nodo: una función que recibe el estado y devuelve lo que cambia.
 
+import asyncio
+
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
-
-from asistente_ia.herramientas import list_events
-
-HERRAMIENTAS = {
-    "list_events": list_events,
-}
 
 INSTRUCCIONES = "Eres un asistente personal. Hoy es lunes 2 de noviembre de 2026."
 
@@ -24,13 +20,21 @@ class Estado(MessagesState):
 
 
 
-def crear_grafo(modelo):
-    # Recibimos el modelo desde fuera y le bindeamos las herramientas (bind_tools() recibe una lista, aunque sea una se debe poner la lista)
-    modelo_con_herramientas = modelo.bind_tools([list_events])
+def crear_grafo(modelo, herramientas):
+    # Recibimos el modelo y las herramientas desde fuera. Las herramientas vienen de los
+    # servidores MCP (ver cliente_mcp.py) y son una lista.
+    # Le bindeamos las herramientas al modelo (bind_tools() recibe una lista)
+    modelo_con_herramientas = modelo.bind_tools(herramientas)
+
+    # Diccionario nombre -> herramienta, para encontrar la que pide el modelo en el nodo tools.
+    # Ejemplo: {"list_events": <herramienta list_events>}
+    herramientas_por_nombre = {}
+    for herramienta in herramientas:
+        herramientas_por_nombre[herramienta.name] = herramienta
 
 
     # ----------------------------------------------------------------
-    # Definimos Nodos
+    # Definimos Nodos (el objeto estado lo crea langraph, es la "mochila" que se ha explicado arriba)
 
     # Convierte la pregunta en un HumanMessage y la añade a la conversación.
     def ingest(estado):
@@ -49,7 +53,7 @@ def crear_grafo(modelo):
 
         respuesta = modelo_con_herramientas.invoke(mensajes)
 
-        return {"messages": [respuesta]} # Solo devolvemos la respuesta del llm
+        return {"messages": [respuesta]} # Solo devolvemos la respuesta del llm , respuesta es un AIMessage, no hace falta convertirlo
 
 
     def tools(estado):
@@ -66,12 +70,16 @@ def crear_grafo(modelo):
             # }
             print("El modelo pide:", llamada["name"], "con", llamada["args"])
 
-            herramienta = HERRAMIENTAS[llamada["name"]]
-            resultado = herramienta.invoke(llamada["args"])
+            herramienta = herramientas_por_nombre[llamada["name"]]
+
+            # Las herramientas MCP son asíncronas: ainvoke devuelve una tarea pendiente, y asyncio.run la ejecuta y espera el resultado.
+            resultado = asyncio.run(herramienta.ainvoke(llamada["args"]))
             print("Resultado de la herramienta:", resultado)
 
             # tool_call_id indica a qué petición responde este resultado.
-            mensaje = ToolMessage(content=str(resultado), tool_call_id=llamada["id"])
+            # El resultado de una herramienta MCP es una lista de bloques de texto, el formato
+            # que entienden todos los modelos, así que se lo pasamos tal cual.
+            mensaje = ToolMessage(content=resultado, tool_call_id=llamada["id"])
             mensajes_con_resultados.append(mensaje)
 
         return {"messages": mensajes_con_resultados}
@@ -105,8 +113,16 @@ def crear_grafo(modelo):
     grafo.add_edge("respond", END)
 
     # -------------------------------------------------------------------
-    # El checkpointer guarda el estado de cada conversación. Así, en la siguiente pregunta,
-    # el grafo recuerda lo que se habló antes. InMemorySaver lo guarda en memoria, de modo
-    # que se pierde al cerrar el programa, en un futuro lo guardaremos en una base de datos o usare REDIS.
+    # Creamos la memoria donde se guardará el estado de cada conversación, algo como:
+    #
+    # {
+    #  "terminal": {"messages": [...todos los mensajes...], "pregunta": ..., "respuesta": ...},
+    #  "otra-conversacion": {...},
+    # }
+    #
+    # La clave ("terminal") es el thread_id que pasamos en el main.
     memoria = InMemorySaver()
+
+    # .compile convierte el plano del grafo en algo que se puede invocar y le da la memoria. No ejecuta nada, el grafo se ejecuta en cada grafo.invoke().
     return grafo.compile(checkpointer=memoria)
+

@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
+    # De dónde lee los eventos el servidor MCP del calendario: demo o google.
+    calendar_backend: str = "demo"
+
+    # Langfuse (trazas). Si las claves están vacías, no se envían trazas.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "https://cloud.langfuse.com"
+
 
 # Se lee una sola vez, al importar este fichero, y todo el proyecto usa esta misma variable.
 settings = Settings()
