@@ -1,0 +1,13 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      TZ: Europe/Madrid
+      # Ollama del host
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./secrets:/app/secrets
+    restart: unless-stopped

@@ -1,17 +1,20 @@
 # Punto de entrada: se ejecuta con `python -m asistente_ia`.
 # Abre una conversación en la terminal. Para salir, escribe "salir" o deja la línea vacía.
 
+import asyncio
+
 from asistente_ia.cliente_mcp import cargar_herramientas_mcp
 from asistente_ia.grafo import crear_grafo
 from asistente_ia.llm import crear_llm
 from asistente_ia.trazas import crear_callbacks
 
 
-def main() -> None:
+# async def,main usa await para cargar las herramientas y para ejecutar el grafo.
+async def main() -> None:
     print('Hola, soy el Asistente IA. Escribe tu pregunta ("salir" para terminar).')
 
     modelo = crear_llm("fast")
-    herramientas = cargar_herramientas_mcp()
+    herramientas = await cargar_herramientas_mcp()
     grafo = crear_grafo(modelo, herramientas)
 
 
@@ -29,10 +32,11 @@ def main() -> None:
             print("¡Hasta luego!")
             return
 
-        estado_final = grafo.invoke({"pregunta": pregunta}, configuracion) # Ejecuta el grafo entero con la pregunta y la configuracion
+        estado_final = await grafo.ainvoke({"pregunta": pregunta}, configuracion) # Ejecuta el grafo entero con la pregunta y la configuracion
 
         print("Asistente:", estado_final["respuesta"]) # Devuelve el estado final del grafo, nos quedamos con la respuesta final (estado_final tiene messages,pregunta y respuesta)
 
 
 if __name__ == "__main__":
-    main()
+    # asyncio.run arranca main (que es async) y espera a que termine.
+    asyncio.run(main())

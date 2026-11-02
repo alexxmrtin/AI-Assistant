@@ -17,5 +17,5 @@ wheels/
 .env
 secrets/
 
-# Tests
-tests/
+# Temporal (paso 13 en curso)
+asistente_ia/mcp_gmail.py

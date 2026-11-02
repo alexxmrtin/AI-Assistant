@@ -1,0 +1,28 @@
+name: CI
+
+# se ejecuta en cada push y en cada pull request
+on:
+  push:
+  pull_request:
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # todo el historial, para gitleaks
+
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - run: ruff check .
+
+      - run: pytest

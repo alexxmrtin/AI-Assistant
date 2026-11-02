@@ -2,13 +2,42 @@
 #
 # Cada caja es un nodo: una función que recibe el estado y devuelve lo que cambia.
 
-import asyncio
+from datetime import date
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-INSTRUCCIONES = "Eres un asistente personal. Hoy es lunes 2 de noviembre de 2026."
+DIAS_DE_LA_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MESES = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+]
+
+
+def crear_instrucciones(fecha):
+    # Las instrucciones del sistema, con la fecha de hoy para que el modelo sepa qué día es "mañana" o "el jueves"
+
+    # weekday() da el día de la semana como número: 0 es lunes y 6 es domingo.
+    nombre_del_dia = DIAS_DE_LA_SEMANA[fecha.weekday()]
+    # month va de 1 a 12 y la lista empieza en la posición 0, por eso restamos 1.
+    nombre_del_mes = MESES[fecha.month - 1]
+
+    fecha_en_texto = nombre_del_dia + " " + str(fecha.day) + " de " + nombre_del_mes
+    fecha_en_texto = fecha_en_texto + " de " + str(fecha.year)
+
+    # isoformat() da la fecha como "2026-11-02", el formato que usa list_events.
+    return "Eres un asistente personal. Hoy es " + fecha_en_texto + " (" + fecha.isoformat() + ")."
 
 
 # El estado es la información que viaja de un nodo a otro.Creamos una clase que hereda de la clase MessagesState que importamos.
@@ -20,7 +49,8 @@ class Estado(MessagesState):
 
 
 
-def crear_grafo(modelo, herramientas):
+# fecha_fija: solo para evals y tests, que usan la agenda de prueba (semana del 2 de noviembre de 2026). Si no se pasa, el asistente usa la fecha real de cada día.
+def crear_grafo(modelo, herramientas, fecha_fija=None):
     # Recibimos el modelo y las herramientas desde fuera. Las herramientas vienen de los
     # servidores MCP (ver cliente_mcp.py) y son una lista.
     # Le bindeamos las herramientas al modelo (bind_tools() recibe una lista)
@@ -43,20 +73,32 @@ def crear_grafo(modelo, herramientas):
 
 
     # Llama al modelo con las instrucciones y toda la conversación.
-    # Las instrucciones no se guardan en el estado: se añaden en cada llamada.
-    def agent(estado):
+    # Las instrucciones no se guardan en el estado,se añaden en cada llamada.
+    # async, el nodo es asíncrono porque espera la respuesta del modelo con await.
+    async def agent(estado):
 
         # Creamos una lista con la primera posicion con la instruccion del sistema, y despues metemos todos los mensajes de la conversacion, tanto los HumanMessage,como AIMessage como ToolMessage en el mismo orden como ocurrieron para que el llm tenga todo el contexto.
-        mensajes = [SystemMessage(INSTRUCCIONES)]
+        # La fecha se calcula en cada llamada: así el bot, que puede estar días encendido,siempre sabe qué día es.
+        
+        #fecha_fija es una variable que usan los evals para que el agente crea que dia es hoy, el dia nos lo inventaremos
+
+        if fecha_fija is None:
+            fecha_de_hoy = date.today()
+        else:
+            fecha_de_hoy = fecha_fija
+
+        mensajes = [SystemMessage(crear_instrucciones(fecha_de_hoy))]
         for mensaje in estado["messages"]:
             mensajes.append(mensaje)
 
-        respuesta = modelo_con_herramientas.invoke(mensajes)
+        # ainvoke es la versión async de invoke. await espera la respuesta del modelo, y
+        # mientras tanto el programa puede atender otras cosas (por ejemplo, otro mensaje).
+        respuesta = await modelo_con_herramientas.ainvoke(mensajes)
 
         return {"messages": [respuesta]} # Solo devolvemos la respuesta del llm , respuesta es un AIMessage, no hace falta convertirlo
 
 
-    def tools(estado):
+    async def tools(estado):
         # Ejecuta las herramientas que pidió el modelo en su último mensaje. Sabemos que el AIMessage esta en la ultima posicion por como esta construido el grapho, es decir, la secuencia de pasos que sigue
         ultimo_mensaje = estado["messages"][-1]
         mensajes_con_resultados = []
@@ -72,8 +114,9 @@ def crear_grafo(modelo, herramientas):
 
             herramienta = herramientas_por_nombre[llamada["name"]]
 
-            # Las herramientas MCP son asíncronas: ainvoke devuelve una tarea pendiente, y asyncio.run la ejecuta y espera el resultado.
-            resultado = asyncio.run(herramienta.ainvoke(llamada["args"]))
+            # Las herramientas MCP son asíncronas: await espera a que el servidor MCP
+            # ejecute la herramienta y nos devuelva el resultado.
+            resultado = await herramienta.ainvoke(llamada["args"])
             print("Resultado de la herramienta:", resultado)
 
             # tool_call_id indica a qué petición responde este resultado.

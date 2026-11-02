@@ -4,8 +4,7 @@
 # El fast para tareas sencillas, el smart para tareas complejas. Todo esto se configura en el .env , 
 # se lee aqui y se crea el modelo dependiendo del proveedor asignado a cada uno.
 
-from asistente_ia.config import settings as settings_del_env # Traemos las variables de entorno
-
+from asistente_ia.config import settings as settings_del_env  # Traemos las variables de entorno
 
 # Modelos por defecto. Se cambian sin tocar código con LLM_MODEL_FAST y LLM_MODEL_SMART.
 MODELOS_POR_DEFECTO = {

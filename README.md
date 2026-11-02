@@ -302,3 +302,132 @@ Consecuencia: en modo Prueba Google caduca el inicio de sesión cada 7 días, y 
 ### 8.5. Tests de este paso
 
 `tests/test_mcp_calendar.py` prueba `convertir_evento` con eventos de Google escritos a mano (uno con hora y otro de todo el día sin título), sin conectarse a Google. Los tests que arrancan el servidor le fuerzan `CALENDAR_BACKEND=demo`, para que den siempre el mismo resultado aunque tu `.env` diga `google`.
+
+## 9. Bot de Telegram
+
+### 9.1. Cómo probarlo
+
+1. En Telegram, habla con **@BotFather**: `/newbot`, elige un nombre y un usuario acabado en `bot`. Te dará un token.
+2. Habla con **@userinfobot** para saber tu id de usuario (un número).
+3. En el `.env`, pon `TELEGRAM_BOT_TOKEN=` (el token) y `TELEGRAM_USER_ID=` (tu id).
+4. `pip install -r requirements.txt` y `python -m asistente_ia.telegram_bot`.
+5. Escribe a tu bot desde el móvil. Mientras el programa esté en marcha, te responde. Ctrl+C lo para.
+
+### 9.2. Cómo funciona
+
+El bot es una cuenta de Telegram que maneja nuestro programa. Usamos *polling*: `run_polling()` pregunta a Telegram cada poco si hay mensajes nuevos, así que funciona desde tu ordenador sin servidor público. (La alternativa, *webhook*, necesita una URL pública; llegará al desplegar.)
+
+Con cada mensaje se ejecuta `responder`:
+
+1. Comprueba que el mensaje viene de `TELEGRAM_USER_ID`. A cualquier otro no le contesta: el bot lee tu calendario y cualquiera puede encontrarlo en Telegram.
+2. Llama al grafo con el id del chat como `thread_id`: cada chat tiene su propia memoria.
+3. Envía la respuesta al chat.
+
+### 9.3. El grafo pasa a `async`
+
+La librería de Telegram es asíncrona, y dentro de algo asíncrono no se puede usar `asyncio.run`. Por eso todo lo que espera respuestas pasa a `async def` + `await`:
+
+- En `grafo.py`, los nodos `agent` y `tools` son `async def` y usan `await modelo.ainvoke(...)` y `await herramienta.ainvoke(...)`.
+- `cargar_herramientas_mcp()` es `async def`, así que se llama con `await`.
+- El grafo se ejecuta con `await grafo.ainvoke(...)` en vez de `grafo.invoke(...)`.
+- `asyncio.run` queda solo en los puntos de entrada: `asyncio.run(main())` en `__main__.py`, la carga de herramientas en `telegram_bot.py` y los tests.
+
+Esto sustituye lo explicado en la sección 7.4, donde usábamos `asyncio.run` dentro del grafo.
+
+### 9.4. Tests de este paso
+
+`tests/test_telegram_bot.py` prueba `responder` con un mensaje de Telegram de mentira (no se conecta a Telegram): responde a tu id y no responde, ni llama al modelo, con otro id. El LLM falso tiene ahora también `ainvoke`.
+
+## 10. Evals: medir cómo responde el asistente
+
+### 10.1. Cómo probarlo
+
+`python -m asistente_ia.evals`. Usa el modelo de verdad (gasta unos céntimos de tokens) y siempre la agenda de prueba, aunque el `.env` diga `CALENDAR_BACKEND=google`. Al final muestra la nota, por ejemplo `Nota: 9/10 (90 %)`, y de cada caso fallido, qué falló y qué respondió.
+
+### 10.2. Tests vs. evals
+
+- **Tests** (`pytest`): comprueban que nuestro código funciona, con el LLM falso. Gratis, rápidos y siempre dan lo mismo.
+- **Evals**: comprueban lo bien que responde el modelo real. Cuestan tokens y pueden variar un poco entre ejecuciones, porque el modelo no siempre contesta igual.
+
+Se pasan cuando cambias algo que afecta a las respuestas (el prompt, el modelo, el proveedor) para saber con números si ha mejorado o empeorado.
+
+### 10.3. Cómo se corrige cada caso
+
+Cada caso de `CASOS` (en `evals.py`) tiene una pregunta y unas reglas:
+
+- `debe_contener`: palabras que tienen que aparecer todas.
+- `debe_contener_alguna`: basta con que aparezca una (para cosas que se dicen de varias formas, como "20:30" u "8:30").
+- `debe_usar_herramienta`: si tenía que consultar el calendario o no. Se mira si en la conversación hay algún `ToolMessage`.
+
+`corregir()` devuelve la lista de fallos; si está vacía, el caso está aprobado. Es una corrección sencilla por palabras. En la semana 3 añadiremos un LLM que haga de juez para respuestas más abiertas.
+
+### 10.4. La fecha de "hoy"
+
+Antes la fecha estaba escrita en las instrucciones ("Hoy es lunes 2 de noviembre de 2026"), así que el asistente creía que siempre era ese día. Ahora `crear_instrucciones(fecha)` (en `grafo.py`) escribe la fecha que le pases, y el nodo `agent` usa la fecha real de cada día. Las evals y algunos tests le pasan `fecha_fija` (el 2 de noviembre de 2026), porque la agenda de prueba es de esa semana.
+
+### 10.5. Tests de este paso
+
+`tests/test_evals.py` prueba `corregir()` con respuestas escritas a mano. `tests/test_tool_calling.py` comprueba que las instrucciones llevan la fecha y que con `fecha_fija` el modelo recibe esa fecha.
+
+## 11. Docker y Compose
+
+### 11.1. Cómo probarlo
+
+1. Ten el `.env` relleno y, si usas Google Calendar, inicia sesión fuera del contenedor (`python -m asistente_ia.google_calendar`) para que exista `secrets/token.json`.
+2. Para el bot si lo tienes abierto con `python -m asistente_ia.telegram_bot`: Telegram no deja que dos programas recojan los mensajes del mismo bot a la vez.
+3. `docker compose up -d --build` construye la imagen y arranca el bot en segundo plano.
+4. `docker compose logs -f` para ver lo que imprime. `docker compose down` para pararlo.
+
+### 11.2. Qué hay dentro del contenedor
+
+Un solo contenedor con el bot de Telegram. El servidor MCP del calendario no necesita uno propio: el bot lo arranca como proceso hijo por stdio, así que vive dentro del mismo contenedor. Cuando lleguen Postgres y n8n, Compose levantará más servicios.
+
+### 11.3. `Dockerfile`
+
+- Parte de `python:3.12-slim` e instala `tzdata` (zonas horarias), que la imagen slim no trae.
+- Copia primero `requirements.txt` e instala: así Docker reutiliza esa capa si solo cambias código.
+- Copia solo `asistente_ia/`. El `.env`, `secrets/` y `.venv` nunca entran en la imagen.
+- Arranca `python -m asistente_ia.telegram_bot`.
+
+### 11.4. `docker-compose.yml`
+
+- `env_file: .env`: las claves llegan al contenedor desde tu `.env`, no se guardan en la imagen.
+- `TZ: Europe/Madrid`: sin esto el contenedor usa la hora UTC y el bot podría equivocarse de día.
+- `OLLAMA_BASE_URL` y `extra_hosts`: dentro del contenedor, `localhost` es el propio contenedor; tu ordenador se alcanza como `host.docker.internal`. Solo importa si usas Ollama.
+- `volumes: ./secrets:/app/secrets`: el contenedor usa tus `credentials.json` y `token.json`, y cuando renueva el token, el nuevo se guarda en tu carpeta.
+- `restart: unless-stopped`: si se cae o reinicias el ordenador, vuelve a arrancar solo.
+
+El inicio de sesión con Google se hace siempre fuera del contenedor, porque necesita abrir el navegador. En modo Prueba, cuando caduque a los 7 días: inicias sesión fuera y `docker compose restart`.
+
+## 12. CI y secretos
+
+### 12.1. Cómo probarlo
+
+1. Activa pre-commit una vez en tu ordenador: `pre-commit install`. Desde entonces, cada `git commit` pasa antes ruff y gitleaks; si alguno falla, el commit no se hace.
+2. Para pasarlo a mano sobre todo el proyecto: `pre-commit run --all-files`.
+3. Haz push y mira la pestaña **Actions** del repo en GitHub: cada push aparece con ✓ verde o ✗ roja. Pinchando en él ves cada paso y su salida.
+
+### 12.2. Qué es la CI
+
+CI (integración continua) significa que, en cada push, GitHub arranca una máquina limpia, instala el proyecto desde cero y pasa las comprobaciones. Si algo falla, lo ves en el commit. Así, lo que está en GitHub siempre está probado, y no depende de que te acuerdes de pasar los tests.
+
+### 12.3. `.github/workflows/ci.yml`
+
+- `on: push` y `pull_request`: cuándo se ejecuta.
+- `runs-on: ubuntu-latest`: la máquina que pone GitHub.
+- `actions/checkout`: descarga el código (con todo el historial, para que gitleaks lo revise entero).
+- `gitleaks/gitleaks-action`: busca claves en el código y en los commits. En repos personales no necesita licencia.
+- `actions/setup-python`, `pip install`, `ruff check .` y `pytest`: lo mismo que haces tú en la terminal.
+
+Los tests no necesitan claves: usan el LLM falso y la agenda de prueba.
+
+### 12.4. `.pre-commit-config.yaml`
+
+- `ruff`: el mismo linter, antes de cada commit.
+- `gitleaks`: revisa solo lo que vas a commitear. Si ve algo con pinta de clave, para el commit, así la clave no llega nunca a GitHub.
+
+La primera vez tarda un poco porque pre-commit descarga las herramientas.
+
+### 12.5. Decisión: líneas largas permitidas
+
+Ruff tenía activada la regla E501 (líneas de más de 100 caracteres), y los comentarios largos que son apuntes la incumplían. Se ha desactivado en `pyproject.toml`.

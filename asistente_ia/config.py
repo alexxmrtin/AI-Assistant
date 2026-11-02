@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # De dónde lee los eventos el servidor MCP del calendario: demo o google.
     calendar_backend: str = "demo"
 
+    # Telegram: el token del bot (te lo da @BotFather) y tu id de usuario (@userinfobot).
+    # El bot solo responde a ese id.
+    telegram_bot_token: str = ""
+    telegram_user_id: str = ""
+
     # Langfuse (trazas). Si las claves están vacías, no se envían trazas.
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
