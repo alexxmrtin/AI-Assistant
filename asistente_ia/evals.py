@@ -12,6 +12,7 @@ import asyncio
 from datetime import date
 
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from asistente_ia.cliente_mcp import SERVIDORES, cargar_herramientas_mcp
 from asistente_ia.grafo import crear_grafo
@@ -138,6 +139,10 @@ async def main():
             "callbacks": crear_callbacks(),
         }
         estado_final = await grafo.ainvoke({"pregunta": caso["pregunta"]}, configuracion)
+
+        # Las evals solo tienen consultas. Si el modelo la confunde con una acción, el grafo se para a pedir aprobación: lo reanudamos con un "no" y el caso fallará
+        if "__interrupt__" in estado_final:
+            estado_final = await grafo.ainvoke(Command(resume=False), configuracion)
 
         # se uso la herramienta? Si en la conversación hay algún ToolMessage, sí
         uso_herramienta = False

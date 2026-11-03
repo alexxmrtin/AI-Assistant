@@ -6,8 +6,34 @@ services:
       TZ: Europe/Madrid
       # Ollama del host
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # dentro de compose, postgres se llama db
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./secrets:/app/secrets
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
+
+  db:
+    # postgres 16 con pgvector (lo usaremos en la semana 4)
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # solo accesible desde tu ordenador
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - datos_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  datos_postgres:

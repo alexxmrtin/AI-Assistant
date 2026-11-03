@@ -13,6 +13,10 @@ langchain-ollama==1.1.0
 # Orquestación: el grafo del asistente
 langgraph==1.2.18
 
+# Memoria del grafo en Postgres: la pieza de LangGraph y el conector de Python con Postgres
+langgraph-checkpoint-postgres==3.2.0
+psycopg[binary]==3.3.7
+
 # Trazas: ver cada paso del grafo en Langfuse
 langfuse==5.0.4
 

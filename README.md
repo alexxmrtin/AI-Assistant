@@ -501,3 +501,149 @@ Los dos permisos son de solo lectura: con este token es imposible enviar, borrar
 ### 14.5. Tests de este paso
 
 En `tests/test_mcp_correo.py`: `convertir_resumen` con un correo de Google escrito a mano (y otro sin asunto), y `sacar_texto` con un correo de varias partes y otro solo con HTML. Ninguno se conecta a Google. El test que arranca el servidor le fuerza `CORREO_BACKEND=demo`, para que dé siempre el mismo resultado aunque tu `.env` diga `google`.
+
+## 15. Memoria del grafo en Postgres
+
+### 15.1. Cómo probarlo
+
+1. `pip install -r requirements.txt` (hay dos librerías nuevas: `langgraph-checkpoint-postgres` y `psycopg`).
+2. En el `.env`, añade las líneas de Postgres de `.env.example`. Pon una contraseña solo con letras y números en `POSTGRES_PASSWORD`, y esa misma contraseña dentro de `DATABASE_URL`, en lugar de `TU_CONTRASEÑA`.
+3. Arranca solo la base de datos: `docker compose up -d db`. La primera vez descarga la imagen. Con `docker compose ps` verás `db` como `healthy`.
+4. `python -m asistente_ia`. Al arrancar dirá "Memoria en Postgres". Dile "Me llamo Alejandro", sal con "salir", vuelve a arrancarlo y pregúntale "¿Cómo me llamo?". Se acuerda.
+5. Lo mismo con el bot: `python -m asistente_ia.telegram_bot`, o todo junto en Docker con `docker compose up -d`.
+6. `pytest`.
+
+Para parar la base de datos: `docker compose stop db`. Los datos no se pierden al pararla: viven en el volumen `datos_postgres`.
+
+### 15.2. Para qué sirve
+
+El checkpointer (apartado 5.6) es donde el grafo guarda el estado de cada conversación después de cada nodo, como los puntos de guardado de un videojuego. Hasta ahora era `InMemorySaver`: vivía en la RAM del programa y desaparecía al cerrarlo. Ahora es `AsyncPostgresSaver`: el mismo guardado, pero en tablas de Postgres.
+
+Nos hace falta para la aprobación (apartado 17). Cuando el asistente te proponga enviar un correo, el grafo se quedará parado a medias esperando tu respuesta, quizá horas. Si en ese tiempo el bot se reinicia, la propuesta tiene que seguir guardada para poder continuar.
+
+### 15.3. `memoria.py`
+
+`abrir_memoria()` mira `DATABASE_URL`:
+
+- **Vacía**: devuelve `InMemorySaver`, como antes. Así funcionan los tests y la CI, que no tienen Postgres.
+- **Con valor**: abre una conexión con `psycopg` (el conector de Python con Postgres) y crea un `AsyncPostgresSaver` encima. `setup()` crea las tablas de LangGraph la primera vez; las siguientes veces no hace nada.
+
+`DATABASE_URL` tiene la forma `postgresql://usuario:contraseña@servidor:puerto/base_de_datos`. Desde tu ordenador el servidor es `localhost`. Dentro de Compose, el bot ve a Postgres por el nombre del servicio, `db`. Por eso `docker-compose.yml` le pone al bot su propia `DATABASE_URL`, que sustituye a la del `.env`.
+
+### 15.4. Cómo encaja en el código
+
+- `grafo.py`: `crear_grafo` recibe la memoria como argumento (`memoria=`). Si no se le pasa, usa la RAM, así los tests no cambian.
+- `__main__.py`: abre la memoria con `await abrir_memoria()` y se la pasa al grafo.
+- `telegram_bot.py`: el asistente se monta ahora en `preparar_asistente`, que el bot ejecuta al arrancar (`post_init`). La conexión con Postgres pertenece al bucle async donde se abre, y `run_polling` crea su propio bucle; si la abriéramos antes con `asyncio.run`, fallaría con el primer mensaje.
+- `docker-compose.yml`: nuevo servicio `db` con la imagen de Postgres 16 con pgvector (pgvector lo usaremos en la semana 4 para la memoria a largo plazo). Su puerto solo se abre en `127.0.0.1`, así que nadie fuera de tu ordenador puede conectarse. El bot espera a que `db` esté `healthy` antes de arrancar.
+
+### 15.5. Tests de este paso
+
+`tests/test_memoria.py` comprueba que sin `DATABASE_URL` la memoria va a la RAM, y que el grafo guarda la conversación en la memoria que le pasan. La prueba contra un Postgres de verdad (guardar, cerrar, volver a abrir y que se acuerde) es la del apartado 15.1, porque la CI no tiene base de datos.
+
+## 16. Salida estructurada con Pydantic: el nodo `route`
+
+### 16.1. Cómo probarlo
+
+1. `python -m asistente_ia` y pregunta "¿Qué tengo el jueves?". En la terminal verás `Clasificación: consulta - ...` y después responde como siempre.
+2. Ahora pide algo que cambie tu cuenta: "Responde a Laura que el viernes me va bien" o "Borra el dentista". Verás `Clasificación: accion - ...` y, desde el paso 6, te pedirá aprobación (apartado 17).
+3. `pytest`.
+
+### 16.2. Para qué sirve
+
+Antes de que el agente se ponga a trabajar, el nodo `route` decide si el mensaje es una **consulta** (saber algo, leer la agenda o el correo, charlar) o una **acción** (enviar un correo, crear, mover o borrar un evento). Según la respuesta, el grafo va por un camino u otro:
+
+```
+ingest → route → consulta → agent ⇄ tools → respond
+               → accion   → propose → approval_gate → execute / reject
+```
+
+Al principio el camino de acción solo contestaba que aún no estaba disponible (nodo `accion_no_disponible`). En el paso 6 (apartado 17) se cambió por la propuesta y la aprobación.
+
+### 16.3. Salida estructurada
+
+Si le preguntáramos al modelo "¿esto es una consulta o una acción?" con texto libre, podría contestar "Es una acción", "acción.", "Creo que es una consulta porque..." y tendríamos que adivinar qué ha querido decir. Con salida estructurada le damos una ficha con campos fijos y le obligamos a rellenarla:
+
+```python
+class Clasificacion(BaseModel):
+    intencion: str = Field(description="'consulta' si ... 'accion' si ...")
+    motivo: str = Field(description="Una frase corta que explique por qué...")
+```
+
+- `BaseModel` es la clase de Pydantic para definir fichas: cada campo tiene un nombre y un tipo. Pydantic ya lo usábamos sin verlo: `pydantic-settings` (apartado 2) está hecho con él.
+- `Field(description=...)` es lo que lee el modelo para saber qué poner en cada campo, igual que la descripción de una herramienta.
+- `modelo.with_structured_output(Clasificacion)` crea una versión del modelo que devuelve directamente un objeto `Clasificacion` ya comprobado. Por dentro usa el tool calling del apartado 3: le da al modelo una "herramienta" con la forma de la ficha y le obliga a usarla.
+
+### 16.4. Qué pasa si el modelo se equivoca
+
+Un modelo puede fallar al rellenar la ficha. `route` lo controla en tres niveles, y en todos elige "consulta", porque es lo seguro (no cambia nada):
+
+1. **Ficha inválida** (falta un campo o el tipo no es el correcto): Pydantic lanza `ValidationError`, o LangChain `OutputParserException` si no puede ni leerla. Se recoge con `try/except`.
+2. **No rellena la ficha** (contesta con texto normal): llega `None`.
+3. **Rellena la ficha con otra palabra** ("saludo", "Acción"): Pydantic solo garantiza que es un texto, no que sea una de nuestras dos palabras. Lo comprobamos nosotros: "accion" o "acción" es acción; cualquier otra cosa, consulta.
+
+### 16.5. Cómo encaja en el código
+
+- `grafo.py`: la clase `Clasificacion`, las instrucciones del clasificador, el campo `intencion` en el estado, y el nodo `route`.
+- `route` solo le pasa al modelo el mensaje nuevo, no toda la conversación: para clasificar basta, y gasta menos tokens. A cambio, cada mensaje hace ahora una llamada más al modelo (la clasificación), que se ve en Langfuse.
+- `tests/llm_falso.py`: `LLMFalso` tiene ahora `with_structured_output`, que devuelve un `ClasificadorFalso`. Si no se le preparan intenciones, todo es "consulta", así los tests anteriores no han cambiado.
+
+### 16.6. Tests de este paso
+
+`tests/test_route.py`: una acción no llega al agente (va al camino de aprobación), una consulta sí, "Acción" con tilde y mayúscula cuenta como acción, una palabra desconocida y una ficha sin rellenar se tratan como consulta.
+
+## 17. Aprobación antes de actuar (`approval_gate`)
+
+### 17.1. Cómo probarlo
+
+1. `python -m asistente_ia` y pide una acción: "Borra el dentista del jueves".
+2. Verás `Propuesta: {...}` y la pregunta `¿Apruebas? (s/n)`.
+3. Responde `n`: contesta "Vale, no hago nada" y no se ejecuta nada.
+4. Repite y responde `s`: verás `[PRUEBA] Aquí se ejecutaría: ...`. De momento no cambia nada de verdad; eso llega en los pasos 7 (Gmail) y 8 (Calendar).
+5. `pytest`.
+
+En Telegram todavía no hay botones para aprobar (llegan en el paso 9), así que de momento el bot rechaza las acciones y avisa.
+
+### 17.2. Para qué sirve
+
+Es la pieza de seguridad más importante del proyecto: **el modelo propone, la persona decide y el código ejecuta**. El modelo nunca tiene a mano las herramientas que escriben (enviar un correo, borrar un evento). Solo rellena una propuesta, y el único nodo que puede hacer cambios (`execute`) solo se alcanza pasando por `approval_gate` con un sí. Así, aunque alguien engañe al modelo con un correo trampa, como mucho conseguirá una propuesta rara que tú verás y rechazarás.
+
+```
+route → accion → propose → approval_gate ──(se para y pregunta)
+                               │ sí → execute → END
+                               │ no → reject  → END
+         (si propose no entiende la acción, contesta pidiendo detalles y termina)
+```
+
+### 17.3. Proponer: la segunda ficha
+
+`propose` usa salida estructurada, igual que `route` (apartado 16), con otra ficha:
+
+```python
+class PropuestaDeAccion(BaseModel):
+    accion: str    # "enviar correo", "crear evento", "mover evento" o "borrar evento"
+    detalles: str  # a quién, qué texto, qué día y a qué hora...
+```
+
+A diferencia de `route`, a `propose` le pasamos toda la conversación, para que entienda cosas como "bórralo" refiriéndose a algo de lo que hablabais antes. La propuesta se guarda en el estado como un diccionario normal.
+
+### 17.4. Pausar y reanudar: `interrupt` y `Command(resume=...)`
+
+- `interrupt(valor)` dentro de `approval_gate` **para el grafo**: guarda el estado en la memoria (por eso hace falta el checkpointer del apartado 15) y `ainvoke` termina devolviendo una clave `"__interrupt__"` con el valor (la propuesta).
+- El main ve esa clave, enseña la propuesta y pregunta `¿Apruebas? (s/n)`.
+- `grafo.ainvoke(Command(resume=True), configuracion)` **reanuda** el grafo en esa misma conversación (mismo `thread_id`). El nodo `approval_gate` se vuelve a ejecutar desde el principio, pero esta vez `interrupt()` no para: devuelve el valor de `resume`.
+- Solo un `True` exacto cuenta como sí. Cualquier otra cosa es no.
+
+Como la pausa queda guardada en la memoria, con Postgres el grafo puede esperar tu respuesta aunque el programa se reinicie. Lo necesitaremos en Telegram, donde puedes tardar horas en pulsar el botón.
+
+### 17.5. Cómo encaja en el código
+
+- `grafo.py`: la clase `PropuestaDeAccion`, los campos `propuesta` y `aprobada` en el estado, y los nodos `propose`, `approval_gate`, `execute` y `reject` (sustituyen a `accion_no_disponible`).
+- `__main__.py`: el bucle `while "__interrupt__" in estado_final` que pregunta y reanuda.
+- `telegram_bot.py`: si el grafo se para, lo reanuda con un no y avisa de que las acciones aún solo funcionan en la terminal.
+- `evals.py`: las evals solo tienen consultas. Si el modelo confunde una con una acción, se reanuda con un no y ese caso falla.
+- `tests/llm_falso.py`: `with_structured_output` devuelve un falso distinto según la ficha. Para `PropuestaDeAccion`, un `ProponedorFalso` que por defecto propone borrar el dentista.
+
+### 17.6. Tests de este paso
+
+`tests/test_aprobacion.py`: el grafo se para con la propuesta, con un sí se ejecuta, con un no no, cualquier valor que no sea `True` es un no, si no hay propuesta no pide aprobación, y Telegram rechaza las acciones sin dejar el grafo parado.

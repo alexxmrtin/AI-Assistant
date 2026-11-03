@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     # De dónde lee los correos el servidor MCP del correo: demo o google.
     correo_backend: str = "demo"
 
+    # Dónde está la base de datos Postgres que guarda las conversaciones. Vacía = en RAM (se pierden al cerrar).
+    database_url: str = ""
+
     # Telegram: el token del bot (te lo da @BotFather) y tu id de usuario (@userinfobot).
     # El bot solo responde a ese id.
     telegram_bot_token: str = ""
