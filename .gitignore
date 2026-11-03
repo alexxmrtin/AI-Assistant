@@ -16,6 +16,3 @@ wheels/
 # Secretos: nunca al repo
 .env
 secrets/
-
-# Temporal (paso 13 en curso)
-asistente_ia/mcp_gmail.py

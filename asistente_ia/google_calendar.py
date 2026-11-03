@@ -1,68 +1,18 @@
-# Lectura de Google Calendar: el inicio de sesión con Google (OAuth) y la consulta de eventos.
+# Lectura de Google Calendar: la consulta de eventos.
 #
 # Lo usa el servidor MCP (mcp_calendar.py) cuando CALENDAR_BACKEND=google.
 #
-# Iniciar sesión, solo la primera vez: python -m asistente_ia.google_calendar
-# Se abre el navegador, aceptas el permiso y se guarda el token en secrets/token.json.
+# El inicio de sesión con Google está en google_auth.py (lo comparte con Gmail).
 
-import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from google.auth.exceptions import RefreshError  # el error cuando no se puede renovar
-from google.auth.transport.requests import Request  # para renovar el token caducado
-from google.oauth2.credentials import Credentials  # lee el token.json guardado
-from google_auth_oauthlib.flow import InstalledAppFlow  # inicio de sesión en el navegador
 from googleapiclient.discovery import build  # crea el objeto para usar la API de Calendar
 
-# Permiso que pedimos a Google: solo LEER el calendario. Con este permiso es imposible crear, cambiar o borrar eventos, aunque el modelo lo intentara
-# No es una url es n permiso (se llama scope), le dice a google lo que queremos hacer
-PERMISOS = ["https://www.googleapis.com/auth/calendar.readonly"]
-
-# credentials.json identifica a nuestra app ante Google.
-# token.json es la llave que nos da Google al iniciar sesión. El token caduca cada hora, cargar_credenciales() lo actualiza solo hasta pasados 7 dias
-RUTA_CREDENCIALES = "secrets/credentials.json"
-RUTA_SESION = "secrets/token.json"
+from asistente_ia.google_auth import cargar_credenciales
 
 # Zona horaria en la que pedimos y recibimos las horas de los eventos.
 ZONA_HORARIA = "Europe/Madrid"
-
-
-def iniciar_sesion():
-    # Abre el navegador con la página de Google para aceptar el permiso.
-    # run_local_server levanta un mini servidor web en tu equipo para recibir la respuesta.La libreria por dentro gestiona el async, no hace falta poner nada
-    flujo = InstalledAppFlow.from_client_secrets_file(RUTA_CREDENCIALES, PERMISOS)
-    credenciales = flujo.run_local_server(port=0)
-    guardar_token(credenciales)
-    print("Sesión iniciada. Token guardado en", RUTA_SESION)
-
-
-def guardar_token(credenciales):
-    with open(RUTA_SESION, "w") as fichero:
-        fichero.write(credenciales.to_json())
-
-
-def cargar_credenciales():
-    if not os.path.exists(RUTA_SESION):
-        raise RuntimeError(
-            "No hay sesión de Google. Ejecuta primero: python -m asistente_ia.google_calendar"
-        )
-
-    credenciales = Credentials.from_authorized_user_file(RUTA_SESION, PERMISOS)
-
-    # El token tiene dos partes: una llave de acceso que caduca cada hora y otra para renovarla (refresh token). Si la de acceso ha caducado, pedimos una nueva a Google sin volver a abrir el navegador, y la guardamos.
-    if not credenciales.valid:
-        # Si el refresh token también ha caducado (en modo Prueba, a los 7 días), Google lanza RefreshError. Lo recogemos para dar un mensaje claro que el modelo pueda transmitirte, en vez del error técnico de Google.
-        try:
-            credenciales.refresh(Request())
-        except RefreshError:
-            raise RuntimeError(
-                "La sesión de Google ha caducado. Vuelve a ejecutar: "
-                "python -m asistente_ia.google_calendar"
-            ) from None
-        guardar_token(credenciales)
-
-    return credenciales
 
 
 def convertir_evento(evento_de_google):
@@ -124,6 +74,3 @@ def listar_eventos_google(fecha_inicio, fecha_fin):
 
     return eventos_encontrados
 
-
-if __name__ == "__main__":
-    iniciar_sesion()

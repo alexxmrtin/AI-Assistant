@@ -272,7 +272,7 @@ La librería de MCP es asíncrona: sus funciones (`get_tools`, `ainvoke`) no dev
 
 1. Crea el proyecto en [Google Cloud](https://console.cloud.google.com): activa la Google Calendar API, configura la pantalla de consentimiento (público Externo, en modo "Prueba", y añade tu Gmail en Público → Usuarios de prueba) y crea un cliente OAuth de tipo "App de escritorio". Descarga su JSON como `secrets/credentials.json`.
 2. `pip install -r requirements.txt`.
-3. Inicia sesión una vez: `python -m asistente_ia.google_calendar`. Se abre el navegador; como la app no está verificada, Google avisa: pulsa "Continuar" (o "Configuración avanzada" → "Ir a Asistente IA") y acepta el permiso. En modo Prueba, repite este paso cada 7 días. Se crea `secrets/token.json`.
+3. Inicia sesión una vez: `python -m asistente_ia.google_auth`. Se abre el navegador; como la app no está verificada, Google avisa: pulsa "Continuar" (o "Configuración avanzada" → "Ir a Asistente IA") y acepta el permiso. En modo Prueba, repite este paso cada 7 días. Se crea `secrets/token.json`.
 4. En el `.env`, pon `CALENDAR_BACKEND=google`.
 5. `python -m asistente_ia` y pregunta por tus eventos reales.
 
@@ -291,11 +291,11 @@ Los dos están en `secrets/`, que está en el `.gitignore`.
 
 **Decidido el 01-11-2026.** Es un proyecto de uso personal: quien quiera usarlo crea su propio proyecto de Google Cloud y su cliente OAuth. Por eso la app se queda en modo "Prueba", con mi cuenta como usuario de prueba, sin rellenar página principal ni política de privacidad.
 
-Consecuencia: en modo Prueba Google caduca el inicio de sesión cada 7 días, y hay que volver a ejecutar `python -m asistente_ia.google_calendar`. Si más adelante molesta (por ejemplo, con el bot y n8n funcionando solos), se puede pasar a "En producción" sin verificar: hay que añadir en Desarrollo de la marca una URL de página principal y otra de política de privacidad. El código no cambia.
+Consecuencia: en modo Prueba Google caduca el inicio de sesión cada 7 días, y hay que volver a ejecutar `python -m asistente_ia.google_auth`. Si más adelante molesta (por ejemplo, con el bot y n8n funcionando solos), se puede pasar a "En producción" sin verificar: hay que añadir en Desarrollo de la marca una URL de página principal y otra de política de privacidad. El código no cambia.
 
 ### 8.4. Cómo encaja en el código
 
-- `google_calendar.py`: el inicio de sesión (`iniciar_sesion`), la carga del token (`cargar_credenciales`), la petición a Google (`listar_eventos_google`) y la conversión de cada evento al mismo formato que la agenda de prueba (`convertir_evento`).
+- `google_calendar.py`: el inicio de sesión (`iniciar_sesion`), la carga del token (`cargar_credenciales`), la petición a Google (`listar_eventos_google`) y la conversión de cada evento al mismo formato que la agenda de prueba (`convertir_evento`). Desde el apartado 14, el inicio de sesión y la carga del token están en `google_auth.py`, compartidos con Gmail.
 - `mcp_calendar.py`: `list_events` mira `CALENDAR_BACKEND` y llama a la agenda de prueba (`demo`) o a Google (`google`).
 - El grafo y el cliente MCP no cambian: no saben de dónde salen los eventos.
 
@@ -373,7 +373,7 @@ Antes la fecha estaba escrita en las instrucciones ("Hoy es lunes 2 de noviembre
 
 ### 11.1. Cómo probarlo
 
-1. Ten el `.env` relleno y, si usas Google Calendar, inicia sesión fuera del contenedor (`python -m asistente_ia.google_calendar`) para que exista `secrets/token.json`.
+1. Ten el `.env` relleno y, si usas Google Calendar, inicia sesión fuera del contenedor (`python -m asistente_ia.google_auth`) para que exista `secrets/token.json`.
 2. Para el bot si lo tienes abierto con `python -m asistente_ia.telegram_bot`: Telegram no deja que dos programas recojan los mensajes del mismo bot a la vez.
 3. `docker compose up -d --build` construye la imagen y arranca el bot en segundo plano.
 4. `docker compose logs -f` para ver lo que imprime. `docker compose down` para pararlo.
@@ -431,3 +431,73 @@ La primera vez tarda un poco porque pre-commit descarga las herramientas.
 ### 12.5. Decisión: líneas largas permitidas
 
 Ruff tenía activada la regla E501 (líneas de más de 100 caracteres), y los comentarios largos que son apuntes la incumplían. Se ha desactivado en `pyproject.toml`.
+
+## 13. Servidor MCP del correo
+
+### 13.1. Cómo probarlo
+
+1. `python -m asistente_ia` y pregunta "¿Tengo algún correo de Laura?" y después "¿Qué me dice en el primero?".
+2. En la terminal verás `El modelo pide: search_emails ...` y luego `read_email ...`: primero busca y después lee solo el que necesita.
+3. `pytest`.
+
+De momento el correo es una bandeja de prueba con 8 correos inventados. Tu Gmail real llega en el apartado 14.
+
+### 13.2. Para qué sirve
+
+Es el segundo servidor MCP, gemelo del calendario (apartado 7): un programa aparte que ofrece herramientas de correo. Tener un servidor por servicio hace que cada uno solo tenga los permisos de lo suyo: el del correo no puede tocar el calendario y al revés.
+
+Tiene dos herramientas:
+
+- `search_emails(texto)`: busca el texto en el remitente, el asunto y el mensaje, y devuelve un resumen de cada correo (`id`, `de`, `asunto`, `fecha`), sin el mensaje.
+- `read_email(id_correo)`: devuelve un correo entero.
+
+Están separadas a propósito, como la bandeja de entrada de Gmail y abrir un correo. Si la búsqueda devolviera el texto de todos los correos, el modelo recibiría muchísimo texto (y cada palabra cuesta tokens). Así, primero ve la lista y luego abre solo los que le hacen falta.
+
+### 13.3. Cómo encaja en el código
+
+- `cliente_mcp.py` tiene ahora dos servidores en `SERVIDORES`. `cargar_herramientas_mcp()` los arranca los dos y devuelve todas las herramientas juntas: `list_events`, `search_emails` y `read_email`.
+- El grafo no cambia nada: recibe una lista de herramientas más larga y el modelo elige cuál usar leyendo sus descripciones.
+- La bandeja de prueba vive en `mcp_correo.py`, igual que la agenda de prueba en `mcp_calendar.py`. Sus correos son de la misma semana (2 de noviembre de 2026), y en el apartado 23 se le añadirán correos con trampa para medir ataques.
+
+### 13.4. Tests de este paso
+
+`tests/test_mcp_correo.py` prueba la búsqueda (por remitente, sin distinguir mayúsculas, sin texto, sin resultados, que no devuelve el mensaje), la lectura (un correo que existe y uno que no) y el camino completo por MCP. En `tests/test_mcp_calendar.py`, el test del cliente ya no espera que `list_events` sea la única herramienta, porque ahora también llegan las del correo.
+
+## 14. Gmail real
+
+### 14.1. Cómo probarlo
+
+1. En [Google Cloud](https://console.cloud.google.com), en el mismo proyecto del apartado 8: busca "Gmail API" en la barra de arriba y pulsa **Habilitar**.
+2. En **Google Auth Platform → Acceso a los datos → Añadir o quitar permisos**, busca `gmail.readonly`, márcalo y guarda.
+3. Vuelve a iniciar sesión: `python -m asistente_ia.google_auth`. Google te enseñará los dos permisos (leer el calendario y leer el correo); acepta los dos. El `token.json` se sustituye por uno nuevo.
+4. En el `.env`, añade `CORREO_BACKEND=google`.
+5. `python -m asistente_ia` y pregunta "¿Cuáles son mis últimos correos?" o "¿Tengo algún correo de GitHub?".
+6. `pytest`.
+
+Si te saltas el paso 3, el asistente responde que a la sesión le faltan permisos y te dice el comando.
+
+### 14.2. Un solo inicio de sesión para todo Google
+
+Antes el inicio de sesión estaba en `google_calendar.py`. Ahora está en `google_auth.py`, y Calendar y Gmail lo usan los dos: un solo `credentials.json`, un solo `token.json` y un solo comando para iniciar sesión.
+
+Pedimos los dos permisos a la vez (`calendar.readonly` y `gmail.readonly`) porque un token solo vale para los permisos que aceptaste al crearlo. Por eso, cada vez que se añade un permiso, hay que volver a iniciar sesión. `cargar_credenciales()` lo comprueba con `has_scopes`: si al token le falta algún permiso, da un mensaje claro en vez del error de Google.
+
+Los dos permisos son de solo lectura: con este token es imposible enviar, borrar o cambiar nada, aunque el modelo lo intentara. `secrets/token.json` ahora también permite leer tu correo: sigue en `secrets/`, fuera del repo.
+
+### 14.3. Cómo se busca y se lee en Gmail (`google_gmail.py`)
+
+- `buscar_correos_google(texto)`: le pasa el texto a Gmail tal cual, como si lo escribieras en su barra de búsqueda (vale `laura`, `from:laura` o `is:unread`). Gmail devuelve solo los ids de hasta 10 correos, y por cada uno pedimos solo el remitente y el asunto (`format="metadata"`), sin el texto.
+- `leer_correo_google(id_correo)`: pide el correo entero (`format="full"`) y saca su texto con `sacar_texto`. Si el id no existe, devuelve el mismo mensaje de error que la bandeja de prueba.
+- `convertir_resumen`: convierte lo que manda Google al mismo formato que la bandeja de prueba (`id`, `de`, `asunto`, `fecha`). La fecha llega en milisegundos desde 1970 (`internalDate`) y se pasa a la hora de Madrid.
+- `sacar_texto`: un correo es un conjunto de partes (formato MIME): texto plano, HTML, adjuntos, y partes dentro de partes. La función busca la primera parte de texto plano y la decodifica de base64. Si el correo solo tiene HTML, usamos el resumen corto de Gmail (`snippet`). Los correos de más de 3000 letras se recortan para no llenar el contexto del modelo.
+
+### 14.4. Cómo encaja en el código
+
+- `mcp_correo.py`: `search_emails` y `read_email` miran `CORREO_BACKEND` y llaman a la bandeja de prueba (`demo`) o a Gmail (`google`), igual que `list_events` con `CALENDAR_BACKEND`.
+- El grafo, el cliente MCP y las descripciones de las herramientas no cambian: el modelo no sabe de dónde salen los correos.
+- El servidor se llama `mcp_correo.py` (y no `mcp_gmail.py`) porque no depende de Google: Gmail es solo una de sus fuentes. Para usar otro proveedor bastaría con un fichero nuevo (por ejemplo `microsoft_outlook.py`) y otra opción en `CORREO_BACKEND`.
+- Las evals fuerzan `CORREO_BACKEND=demo`, igual que el calendario: nunca leen tu correo real.
+
+### 14.5. Tests de este paso
+
+En `tests/test_mcp_correo.py`: `convertir_resumen` con un correo de Google escrito a mano (y otro sin asunto), y `sacar_texto` con un correo de varias partes y otro solo con HTML. Ninguno se conecta a Google. El test que arranca el servidor le fuerza `CORREO_BACKEND=demo`, para que dé siempre el mismo resultado aunque tu `.env` diga `google`.

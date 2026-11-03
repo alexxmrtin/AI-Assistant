@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # De dónde lee los eventos el servidor MCP del calendario: demo o google.
     calendar_backend: str = "demo"
 
+    # De dónde lee los correos el servidor MCP del correo: demo o google.
+    correo_backend: str = "demo"
+
     # Telegram: el token del bot (te lo da @BotFather) y tu id de usuario (@userinfobot).
     # El bot solo responde a ese id.
     telegram_bot_token: str = ""

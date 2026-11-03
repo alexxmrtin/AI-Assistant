@@ -29,13 +29,14 @@ def test_el_cliente_trae_list_events_del_servidor(monkeypatch):
     monkeypatch.setitem(SERVIDORES["calendar"], "env", {"CALENDAR_BACKEND": "demo"})
     herramientas = asyncio.run(cargar_herramientas_mcp())
 
-    nombres = []
+    herramientas_por_nombre = {}
     for herramienta in herramientas:
-        nombres.append(herramienta.name)
-    assert nombres == ["list_events"]
+        herramientas_por_nombre[herramienta.name] = herramienta
+    assert "list_events" in herramientas_por_nombre
 
     argumentos = {"fecha_inicio": "2026-11-05", "fecha_fin": "2026-11-05"}
-    resultado = asyncio.run(herramientas[0].ainvoke(argumentos))
+    tarea_pendiente = herramientas_por_nombre["list_events"].ainvoke(argumentos)
+    resultado = asyncio.run(tarea_pendiente)
     assert "Reunión del TFG" in str(resultado)
     assert "Gimnasio" in str(resultado)
 

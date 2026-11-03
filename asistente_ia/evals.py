@@ -119,6 +119,8 @@ def corregir(caso, respuesta, uso_herramienta):
 async def main():
     # Agregamos una nueva key a el diccionario de cliente_mcp.py, basicamente forzamos que el servidor del calendario sea la demo y no google
     SERVIDORES["calendar"]["env"] = {"CALENDAR_BACKEND": "demo"}
+    # Lo mismo con el correo: las evals siempre usan la bandeja de prueba, nunca tu Gmail.
+    SERVIDORES["correo"]["env"] = {"CORREO_BACKEND": "demo"}
 
     modelo = crear_llm("fast")
     herramientas = await cargar_herramientas_mcp()

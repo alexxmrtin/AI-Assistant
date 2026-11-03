@@ -14,6 +14,11 @@ SERVIDORES = {
         "command": sys.executable,
         "args": ["-m", "asistente_ia.mcp_calendar"],
     },
+    "correo": {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "asistente_ia.mcp_correo"],
+    },
 }
 
 

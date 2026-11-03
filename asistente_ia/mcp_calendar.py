@@ -42,6 +42,8 @@ def list_events(fecha_inicio: str, fecha_fin: str) -> list:
         return listar_eventos_demo(fecha_inicio, fecha_fin)
 
 
+# Funcion para los tests
+
 def listar_eventos_demo(fecha_inicio, fecha_fin):
     eventos_encontrados = []
 
@@ -55,5 +57,5 @@ def listar_eventos_demo(fecha_inicio, fecha_fin):
 
 
 if __name__ == "__main__":
-    # Arranca el servidor por stdio: se queda escuchando hasta que el cliente lo cierra.
+    # Arranca el servidor por stdio
     servidor.run()
