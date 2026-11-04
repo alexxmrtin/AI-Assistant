@@ -42,7 +42,13 @@ async def main() -> None:
         # "__interrupt__" es una lista (un grafo podría pararse en varios sitios a la vez). Nosotros solo tenemos uno, y .value es lo que le pasamos a interrupt()
         while "__interrupt__" in estado_final:
             propuesta = estado_final["__interrupt__"][0].value
-            print("Quiero hacer esto:", propuesta["accion"], "-", propuesta["detalles"])
+            print("Quiero usar", propuesta["herramienta"], "con estos datos:")
+            for nombre in propuesta["argumentos"]:
+                print("  " + nombre + ":", propuesta["argumentos"][nombre])
+            if "evento_actual" in propuesta:
+                print("Evento que se va a cambiar:", propuesta["evento_actual"])
+            if "id_borrador" in propuesta:
+                print("Borrador creado (puedes verlo en Gmail):", propuesta["id_borrador"])
 
             decision = input("¿Apruebas? (s/n): ")
             if decision.strip().lower() == "s":

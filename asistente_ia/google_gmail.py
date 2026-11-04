@@ -1,10 +1,11 @@
-# Lectura de Gmail, buscar correos y leer uno entero.
+# Gmail: buscar correos, leer uno entero, crear un borrador y enviarlo.
 
 # Lo usa el servidor MCP (mcp_correo.py) cuando CORREO_BACKEND=google.
 # Devuelve los correos con la misma forma que la bandeja de prueba (mira mcp_correo), para que el modelo los reciba igual vengan de donde vengan.
 
 import base64
 from datetime import datetime
+from email.message import EmailMessage  # construye un correo (formato MIME); viene con Python
 from zoneinfo import ZoneInfo
 
 from googleapiclient.discovery import build  # crea el objeto para usar la API de Gmail
@@ -78,6 +79,54 @@ def leer_correo_google(id_correo):
 
     correo["texto"] = texto
     return correo
+
+
+def crear_borrador_google(para, asunto, texto, responder_a):
+    servicio = crear_servicio()
+
+    # Un correo por dentro es texto con cabeceras (To, Subject...) y el mensaje, EmailMessage lo monta por nosotros con el formato correcto. 
+    # From no hace falta,Gmail pone tu dirección
+    correo = EmailMessage()
+    correo["To"] = para
+    correo["Subject"] = asunto
+    correo.set_content(texto)
+
+    mensaje_para_google = {}
+
+    # Cuando respondemos a un correo, necesitamos especificar a que conversacion estamos respondiendo, es decir, el conjunto de correo que tiene una conversacion en gmail.
+    # Para ello "responder_a" va a tener el id del correo al que estamos respondiendo en la conversacion, con el vamos a sacar el id de la conversacion ("ThreadID") y el message-id que es el id global para servidores de correo (diferente a lo que viene en el parametro responder_a)
+    if responder_a != "":
+        peticion = servicio.users().messages().get(
+            userId="me",
+            id=responder_a,
+            format="metadata",
+            metadataHeaders=["Message-ID"],
+        )
+        original = peticion.execute()
+
+        mensaje_para_google["threadId"] = original["threadId"]
+
+        # Message-ID es el identificador único del correo original en internet. In-Reply-To y References lo usan los programas de correo de la otra persona (Outlook, el móvil...) para mostrarlo como respuesta
+        for cabecera in original["payload"]["headers"]:
+            if cabecera["name"].lower() == "message-id":
+                correo["In-Reply-To"] = cabecera["value"]
+                correo["References"] = cabecera["value"]
+
+    # La API de Gmail recibe el correo entero codificado en base64
+    correo_en_bytes = correo.as_bytes()
+    mensaje_para_google["raw"] = base64.urlsafe_b64encode(correo_en_bytes).decode()
+
+    # Esto no envia nada a google, de eso se encarga la funcion de abajo, esto lo que hace es crear un borrador en el servidor de google solamente
+    peticion = servicio.users().drafts().create(userId="me", body={"message": mensaje_para_google})
+    borrador = peticion.execute()
+    return borrador["id"]
+
+# Y esta funcion envia ese borrador que hemos creado arriba
+def enviar_borrador_google(id_borrador):
+    servicio = crear_servicio()
+    peticion = servicio.users().drafts().send(userId="me", body={"id": id_borrador})
+    peticion.execute()
+    return "Enviado"
 
 
 def convertir_resumen(mensaje_de_google):

@@ -11,10 +11,11 @@ from google.oauth2.credentials import Credentials  # lee el token.json guardado
 from google_auth_oauthlib.flow import InstalledAppFlow  # inicio de sesión en el navegador
 
 # Permisos (scopes) que pedimos a Google. No son urls que se visiten, son los nombres de los permisos.
-# Los dos son de solo lectura
+# calendar.events permite ver, crear, cambiar y borrar eventos (sustituye a calendar.readonly). gmail.readonly es de solo lectura. gmail.compose permite crear borradores y enviarlos (pero no borrar correos)
 PERMISOS = [
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
 ]
 
 # credentials.json identifica a nuestra app ante Google.

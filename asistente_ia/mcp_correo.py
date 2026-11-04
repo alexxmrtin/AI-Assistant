@@ -5,18 +5,25 @@
 # Tiene dos fuentes de correos y CORREO_BACKEND (en el .env) elige cuál usar:
 #   demo   -> la bandeja de prueba de abajo (la usan los tests y las evals)
 #   google -> tu Gmail (ver google_gmail.py)
-# Por eso se llama "correo" y no "gmail": si algún día usas otro proveedor (por ejemplo Outlook), se añade aquí otra fuente y el resto del asistente no cambia.
 
 
-# Tiene dos herramientas:
+# Tiene cuatro herramientas:
 #   search_emails -> busca y devuelve solo un resumen de cada correo (quién, asunto, fecha), sin el texto
 #   read_email    -> devuelve un correo entero, con su texto
+#   create_draft  -> crea un borrador (no lo envía)
+#   send_draft    -> envía un borrador que ya existe
 # Así el modelo no recibe el texto de todos los correos de golpe (gastaría muchos tokens) y solo lee los que le interesan.
+# Las dos últimas escriben: el agente nunca las recibe, solo las usa el grafo después de que apruebes (ver grafo.py).
 
 from mcp.server.fastmcp import FastMCP
 
 from asistente_ia.config import settings
-from asistente_ia.google_gmail import buscar_correos_google, leer_correo_google
+from asistente_ia.google_gmail import (
+    buscar_correos_google,
+    crear_borrador_google,
+    enviar_borrador_google,
+    leer_correo_google,
+)
 
 servidor = FastMCP("correo", log_level="WARNING")
 
@@ -108,6 +115,32 @@ def read_email(id_correo: str) -> dict:
         return leer_correo_demo(id_correo)
 
 
+# responder_a: str = "" es un valor por defecto, si el modelo no lo rellena, vale "" (un correo nuevo, no una respuesta)
+@servidor.tool(
+    description=(
+        "Crea un borrador de correo. NO lo envía, se enviará solo si la persona lo aprueba. "
+        "para: la dirección de correo del destinatario. "
+        "asunto: el asunto; si respondes a un correo, 'Re: ' más el asunto original. "
+        "texto: el mensaje completo, listo para enviar. "
+        "responder_a: si es una respuesta, el id del correo al que respondes (lo da search_emails); si es un correo nuevo, déjalo vacío. "
+        "Devuelve el id del borrador."
+    )
+)
+def create_draft(para: str, asunto: str, texto: str, responder_a: str = "") -> str:
+    if settings.correo_backend == "google":
+        return crear_borrador_google(para, asunto, texto, responder_a)
+    else:
+        return crear_borrador_demo(para, asunto, texto, responder_a)
+
+
+@servidor.tool(description="Envía un borrador que ya existe, a partir de su id (el que devuelve create_draft).")
+def send_draft(id_borrador: str) -> str:
+    if settings.correo_backend == "google":
+        return enviar_borrador_google(id_borrador)
+    else:
+        return enviar_borrador_demo(id_borrador)
+
+
 # -----------------------–------------------------------------------------------------
 
 # Funciones para los tests
@@ -143,6 +176,16 @@ def leer_correo_demo(id_correo):
     mensaje = "No existe ningún correo con el id " + id_correo
     mensaje = mensaje + ". Usa search_emails para ver los ids."
     return {"error": mensaje}
+
+
+# En la demo no se guarda nada: cada llamada a una herramienta arranca el servidor de cero, así que no podría recordar los borradores. Devolvemos un id inventado.
+# Ojo: aquí no se puede usar print. El servidor habla con el asistente por stdio, y un print se mezclaría con los mensajes MCP y rompería la conversación
+def crear_borrador_demo(para, asunto, texto, responder_a):
+    return "borrador-demo"
+
+
+def enviar_borrador_demo(id_borrador):
+    return "Enviado (demo): " + id_borrador
 
 
 if __name__ == "__main__":

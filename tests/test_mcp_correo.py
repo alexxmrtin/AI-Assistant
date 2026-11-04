@@ -108,3 +108,19 @@ def test_saca_el_texto_plano_de_un_correo_con_varias_partes():
 def test_un_correo_solo_html_no_tiene_texto_plano():
     payload = {"mimeType": "text/html", "body": {"data": "PGI-aG9sYTwvYj4="}}
     assert sacar_texto(payload) == ""
+
+
+def test_el_cliente_trae_las_herramientas_de_escritura(monkeypatch):
+    monkeypatch.setitem(SERVIDORES["correo"], "env", {"CORREO_BACKEND": "demo"})
+    herramientas = asyncio.run(cargar_herramientas_mcp())
+
+    herramientas_por_nombre = {}
+    for herramienta in herramientas:
+        herramientas_por_nombre[herramienta.name] = herramienta
+
+    datos = {"para": "laura.gomez@gmail.com", "asunto": "Re: Hola", "texto": "¡Vale!"}
+    resultado = asyncio.run(herramientas_por_nombre["create_draft"].ainvoke(datos))
+    assert resultado[0]["text"] == "borrador-demo"
+
+    resultado = asyncio.run(herramientas_por_nombre["send_draft"].ainvoke({"id_borrador": "borrador-demo"}))
+    assert "Enviado" in resultado[0]["text"]

@@ -278,7 +278,7 @@ La librería de MCP es asíncrona: sus funciones (`get_tools`, `ainvoke`) no dev
 
 ### 8.2. OAuth: el "iniciar sesión con Google"
 
-El programa nunca ve tu contraseña. Inicias sesión en la página de Google, aceptas el permiso y Google le da al programa un token: una llave limitada que solo sirve para lo que aceptaste. Pedimos `calendar.readonly`, así que con esa llave es imposible crear, cambiar o borrar eventos.
+El programa nunca ve tu contraseña. Inicias sesión en la página de Google, aceptas el permiso y Google le da al programa un token: una llave limitada que solo sirve para lo que aceptaste. Pedimos `calendar.readonly`, así que con esa llave es imposible crear, cambiar o borrar eventos. (Desde el apartado 19 pedimos `calendar.events`, que sí permite cambiar eventos, pero solo después de que tú lo apruebes.)
 
 El token tiene dos partes: una llave de acceso que caduca cada hora y un *refresh token* para pedir otra sin volver a abrir el navegador. `cargar_credenciales()` la renueva sola cuando hace falta.
 
@@ -627,6 +627,8 @@ class PropuestaDeAccion(BaseModel):
 
 A diferencia de `route`, a `propose` le pasamos toda la conversación, para que entienda cosas como "bórralo" refiriéndose a algo de lo que hablabais antes. La propuesta se guarda en el estado como un diccionario normal.
 
+> En el paso 7 (apartado 18) esta ficha se cambió por una llamada a herramienta, para tener los datos exactos que necesita `execute`.
+
 ### 17.4. Pausar y reanudar: `interrupt` y `Command(resume=...)`
 
 - `interrupt(valor)` dentro de `approval_gate` **para el grafo**: guarda el estado en la memoria (por eso hace falta el checkpointer del apartado 15) y `ainvoke` termina devolviendo una clave `"__interrupt__"` con el valor (la propuesta).
@@ -647,3 +649,114 @@ Como la pausa queda guardada en la memoria, con Postgres el grafo puede esperar 
 ### 17.6. Tests de este paso
 
 `tests/test_aprobacion.py`: el grafo se para con la propuesta, con un sí se ejecuta, con un no no, cualquier valor que no sea `True` es un no, si no hay propuesta no pide aprobación, y Telegram rechaza las acciones sin dejar el grafo parado.
+
+## 18. Escribir en Gmail: borrador y envío al aprobar
+
+### 18.1. Qué tienes que hacer tú (una vez)
+
+1. En **Google Cloud → Google Auth Platform → Acceso a los datos → Añadir o quitar permisos**, busca `gmail.compose`, márcalo y guarda (igual que hiciste con `gmail.readonly` en el apartado 14).
+2. Vuelve a iniciar sesión, porque el token antiguo no tiene el permiso nuevo: `python -m asistente_ia.google_auth`. Si no lo haces, el asistente te avisará con un mensaje claro.
+
+### 18.2. Cómo probarlo
+
+1. **Primero con la demo** (`CORREO_BACKEND=demo` en el `.env`): `python -m asistente_ia` y escribe "Responde a Laura que el viernes me va bien". Verás cómo el modelo busca el correo, propone `create_draft` con los datos y te pregunta `¿Apruebas? (s/n)`. Responde `n` y luego repite con `s`. En la demo no se envía nada de verdad.
+2. **Después con tu Gmail** (`CORREO_BACKEND=google`): pídele que te escriba **a ti mismo** ("Mándame un correo a mi dirección con el asunto Prueba"). Antes de contestar a la pregunta, abre Gmail: el borrador ya está en **Borradores**. Si respondes `s`, se envía; si respondes `n`, se queda como borrador.
+3. `pytest`.
+
+### 18.3. Para qué sirve
+
+Es el primer paso en el que el asistente **cambia algo de verdad**. Por eso sigue la regla del apartado 17: el modelo propone, tú decides y el código ejecuta.
+
+- **Las herramientas de escritura no se le dan al agente.** `crear_grafo` separa las herramientas en dos listas. El agente (camino de consulta) solo recibe las de lectura. En `propose` el modelo ve también `create_draft` para poder **proponerla**, pero quien la ejecuta es el grafo.
+- **Segunda barrera.** Si el modelo se inventara una llamada a `send_draft` (no la tiene, pero podría escribir el nombre), el nodo `tools` se niega a ejecutarla.
+- **Borrador primero.** `prepare` crea el borrador antes de preguntarte, para que veas el correo tal cual saldría. Crear un borrador no tiene riesgo: nadie lo recibe. Solo `execute`, después de tu sí, lo envía con `send_draft`.
+
+```
+route → accion → propose ⇄ tools        (puede buscar el correo antes de proponer)
+                 propose → prepare → approval_gate → sí → execute (send_draft) → END
+                                                   → no → reject → END
+                 propose → respond      (si no propone nada, por ejemplo para preguntarte un dato)
+```
+
+### 18.4. La propuesta es una llamada a herramienta
+
+En el paso 6 la propuesta era una ficha con texto libre (`accion` y `detalles`). Para enviar un correo de verdad hacen falta datos exactos (para quién, asunto, texto, a qué correo responde), así que ahora la propuesta es una **llamada a herramienta**, el mismo tool calling del apartado 3:
+
+```python
+{"herramienta": "create_draft", "argumentos": {"para": "...", "asunto": "...", "texto": "...", "responder_a": "c1"}}
+```
+
+Los datos los describe la propia herramienta en su `description`, y en el paso 8 (calendario) servirá igual con `create_event`. La diferencia con el camino de consulta es que aquí la llamada **no se ejecuta**: se guarda en el estado y se te enseña.
+
+Como el modelo pidió una herramienta, la conversación tiene que llevar su resultado (un `ToolMessage`) antes del siguiente mensaje. Lo añade `cerrar_propuesta` en `execute`, `reject` o si falla `prepare`. Así, además, el modelo recuerda qué pasó con su propuesta.
+
+### 18.5. Un correo por dentro
+
+- Un correo es texto con **cabeceras** (`To`, `Subject`...) y el mensaje, en formato **MIME**. `EmailMessage`, que viene con Python, lo monta por nosotros. `From` lo pone Gmail.
+- La API de Gmail lo recibe entero codificado en **base64**, como cuando leemos (apartado 14).
+- **Responder dentro del mismo hilo.** Si es una respuesta (`responder_a`), pedimos el correo original y usamos dos cosas: `threadId`, que agrupa el correo en la misma conversación de Gmail, y su `Message-ID`, que va en las cabeceras `In-Reply-To` y `References` para que el programa de correo de la otra persona también lo muestre como respuesta.
+- `gmail.compose` permite crear borradores y enviarlos, pero no borrar correos.
+
+### 18.6. Cómo encaja en el código
+
+- `mcp_correo.py`: herramientas `create_draft` y `send_draft`, con su versión demo (no guarda nada: cada llamada arranca el servidor de cero) y la de Google.
+- `google_gmail.py`: `crear_borrador_google` y `enviar_borrador_google`.
+- `google_auth.py`: el permiso `gmail.compose`.
+- `grafo.py`: las listas `HERRAMIENTAS_DE_ESCRITURA` y `HERRAMIENTAS_QUE_SE_PUEDEN_PROPONER`, y los nodos `propose`, `prepare`, `execute` y `reject` nuevos. `tools` vuelve a `agent` o a `propose` según la intención. Desaparece `PropuestaDeAccion`.
+- `__main__.py`: enseña la herramienta y sus datos antes de preguntar.
+- `telegram_bot.py`: sigue rechazando las acciones hasta el paso 9. Ojo: con `CORREO_BACKEND=google`, el borrador sí se crea y se queda en Gmail.
+
+### 18.7. Tests de este paso
+
+- `tests/test_aprobacion.py`: el agente no recibe las herramientas de escritura, se crea el borrador y se para antes de enviarlo, con un sí se envía y con un no no, la conversación queda cerrada con su `ToolMessage`, puede buscar antes de proponer, si no propone nada contesta con su texto, el agente no puede ejecutar `send_draft` y Telegram rechaza las acciones.
+- `tests/test_mcp_correo.py`: `create_draft` y `send_draft` de la demo a través del cliente MCP.
+- `tests/llm_falso.py`: `HerramientaFalsa`, que imita una herramienta MCP y apunta con qué datos la llaman. `LLMFalso` apunta qué herramientas recibe en cada `bind_tools`.
+
+## 19. Escribir en el calendario: crear, mover y borrar eventos
+
+### 19.1. Qué tienes que hacer tú (una vez)
+
+1. En **Google Cloud → Google Auth Platform → Acceso a los datos → Añadir o quitar permisos**, marca `calendar.events` y guarda. Puedes quitar `calendar.readonly`, porque `calendar.events` ya incluye leer.
+2. Vuelve a iniciar sesión: `python -m asistente_ia.google_auth`.
+
+### 19.2. Cómo probarlo
+
+1. **Con la agenda de prueba** (`CALENDAR_BACKEND=demo`): `python -m asistente_ia` y escribe "Mueve el dentista al miércoles a la misma hora". Verás cómo el modelo busca el evento con `list_events`, propone `move_event` y, antes de preguntarte, te enseña qué evento se va a cambiar. Prueba también "Borra el gimnasio del jueves" y "Apúntame al gimnasio el sábado a las 10". En la demo no se guarda nada.
+2. **Con tu calendario** (`CALENDAR_BACKEND=google`): crea primero un evento de prueba ("Apúntame Prueba mañana a las 12"), luego muévelo y al final bórralo. Comprueba cada paso en Google Calendar.
+3. `pytest`.
+
+### 19.3. Para qué sirve
+
+Es el mismo camino que el correo (apartado 18): el modelo propone, tú decides y el código ejecuta. Solo cambian las herramientas:
+
+| Herramienta | Tipo | Qué hace |
+| --- | --- | --- |
+| `list_events` | lectura | Eventos entre dos fechas, ahora con su `id` |
+| `get_event` | lectura | Un evento a partir de su `id` |
+| `create_event` | escritura | Crea un evento |
+| `move_event` | escritura | Cambia la fecha y la hora de un evento |
+| `delete_event` | escritura | Borra un evento |
+
+Las tres de escritura están en `HERRAMIENTAS_DE_ESCRITURA` y en `HERRAMIENTAS_QUE_SE_PUEDEN_PROPONER`: el agente no las recibe, el modelo solo puede proponerlas y `execute` las ejecuta después de tu sí.
+
+### 19.4. Identificadores de evento y por qué borrar exige más cuidado
+
+- Para mover o borrar un evento hace falta su **id** (en Google, algo como `4k2j9a...`). El modelo lo consigue antes con `list_events`, igual que el id de un correo con `search_emails`.
+- Un id no le dice nada a una persona. Si la tarjeta dijera "¿Borro el evento 4k2j9a?", aprobarías a ciegas. Por eso `prepare`, para `move_event` y `delete_event`, lee el evento con `get_event` y la propuesta lleva `evento_actual` ("Dentista, 2026-11-03 de 17:30 a 18:00"), que el main te enseña antes de preguntar.
+- Si el id no existe (por ejemplo, el modelo se lo ha inventado), `prepare` para ahí y te lo dice: no se llega a pedir aprobación.
+- Crear se puede deshacer borrando; borrar no se deshace desde el asistente (en Google Calendar el evento va a la papelera, pero tendrías que recuperarlo a mano). Por eso es la acción en la que más importa ver qué apruebas.
+- `move_event` usa `patch`, que solo cambia el inicio y el fin. El título, la descripción o los invitados se quedan como estaban.
+- En los eventos que se repiten (por ejemplo, cada lunes), `list_events` devuelve cada día como un evento suelto con su propio id, así que mover o borrar afecta solo a ese día.
+
+### 19.5. Cómo encaja en el código
+
+- `mcp_calendar.py`: las herramientas nuevas y un `id` en cada evento de la agenda de prueba (`e1` a `e5`).
+- `google_calendar.py`: `leer_evento_google`, `crear_evento_google`, `mover_evento_google` y `borrar_evento_google`, y `convertir_evento` devuelve también el `id`.
+- `google_auth.py`: `calendar.events` en lugar de `calendar.readonly`.
+- `grafo.py`: las herramientas nuevas en las dos listas, `prepare` lee el evento antes de mover o borrar, y `execute` ejecuta la herramienta propuesta tal cual.
+- `__main__.py`: enseña "Evento que se va a cambiar" cuando lo hay.
+
+### 19.6. Tests de este paso
+
+- `tests/test_mcp_calendar.py`: leer un evento por su id, un id que no existe, el formato de hora de Google y las herramientas de escritura de la demo a través del cliente MCP.
+- `tests/test_aprobacion.py`: antes de borrar se enseña qué evento es, con un sí se borra, un id inventado no llega a la aprobación y crear un evento no necesita preparar nada.

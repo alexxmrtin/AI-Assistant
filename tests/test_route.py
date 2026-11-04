@@ -2,7 +2,7 @@ import asyncio
 
 from langchain_core.messages import AIMessage
 
-from asistente_ia.grafo import crear_grafo
+from asistente_ia.grafo import INSTRUCCIONES_DE_PROPUESTA, crear_grafo
 from tests.llm_falso import LLMFalso
 
 
@@ -12,15 +12,16 @@ def preguntar(modelo_falso, pregunta):
     return asyncio.run(grafo.ainvoke({"pregunta": pregunta}, configuracion))
 
 
-def test_una_accion_no_llega_al_agente():
-    modelo_falso = LLMFalso([], ["accion"])
+def test_una_accion_va_a_propose_y_no_al_agente():
+    modelo_falso = LLMFalso([AIMessage(content="¿A quién se lo envío?")], ["accion"])
 
     estado_final = preguntar(modelo_falso, "Responde a Laura que el viernes me va bien")
 
-    # Va por el camino de acción (se para a pedir aprobación) y el agente nunca recibe nada
+    # El modelo solo recibe una llamada, y es la de propose (lleva sus instrucciones)
     assert estado_final["intencion"] == "accion"
-    assert "__interrupt__" in estado_final
-    assert modelo_falso.conversaciones_recibidas == []
+    assert len(modelo_falso.conversaciones_recibidas) == 1
+    instrucciones = modelo_falso.conversaciones_recibidas[0][0].content
+    assert INSTRUCCIONES_DE_PROPUESTA in instrucciones
 
 
 def test_una_consulta_va_al_agente():
@@ -33,7 +34,7 @@ def test_una_consulta_va_al_agente():
 
 
 def test_accion_con_tilde_tambien_cuenta():
-    modelo_falso = LLMFalso([], ["Acción"])
+    modelo_falso = LLMFalso([AIMessage(content="¿Qué evento?")], ["Acción"])
     estado_final = preguntar(modelo_falso, "Borra el dentista")
     assert estado_final["intencion"] == "accion"
 

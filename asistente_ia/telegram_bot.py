@@ -21,7 +21,7 @@ from asistente_ia.trazas import crear_callbacks  # las trazas de Langfuse
 # Hasta el paso 9 no hay botones para aprobar en Telegram, así que de momento las acciones se rechazan solas
 TEXTO_ACCIONES_SOLO_EN_TERMINAL = (
     "Eso es una acción y necesito tu aprobación, pero de momento solo sé pedirla en la terminal. "
-    "Los botones para aprobar desde Telegram llegarán pronto. No he hecho nada."
+    "Los botones para aprobar desde Telegram llegarán pronto. No he enviado nada (si preparé un borrador, se queda en Gmail)."
 )
 
 

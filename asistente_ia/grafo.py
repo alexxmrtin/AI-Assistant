@@ -1,10 +1,12 @@
 #   START → ingest → route → (¿consulta o acción?)
 #                              consulta → agent → (¿pide herramientas?) → tools → agent → ... → respond → END
-#                              accion   → propose → approval_gate → (¿sí o no?) → execute → END
-#                                                                          → reject  → END
+#                              accion   → propose ⇄ tools (si necesita leer algo antes de proponer)
+#                                         propose → prepare → approval_gate → (¿sí o no?) → execute → END
+#                                                                                         → reject  → END
 #
 # Cada caja es un nodo: una función que recibe el estado y devuelve lo que cambia.
 
+import json
 from datetime import date
 
 from langchain_core.exceptions import OutputParserException  # no se pudo leer al modelo
@@ -46,6 +48,19 @@ def crear_instrucciones(fecha):
     return "Eres un asistente personal. Hoy es " + fecha_en_texto + " (" + fecha.isoformat() + ")."
 
 
+# Se llama al final de cada propuesta (aprobada, rechazada o con error). Añade la respuesta (ToolMessage) a la herramienta que pidió el modelo en propose, si no, en el siguiente mensaje el modelo daría error. Así además recuerda qué pasó con su propuesta
+def cerrar_propuesta(estado, texto):
+    # El último mensaje es la propuesta del modelo: approval_gate y prepare no añaden mensajes
+    ultimo_mensaje = estado["messages"][-1]
+
+    mensajes = []
+    for llamada in ultimo_mensaje.tool_calls:
+        mensajes.append(ToolMessage(content=texto, tool_call_id=llamada["id"]))
+    mensajes.append(AIMessage(texto))
+
+    return {"messages": mensajes, "respuesta": texto}
+
+
 # El estado es la información que viaja de un nodo a otro.Creamos una clase que hereda de la clase MessagesState que importamos.
 # IMPORTANTE, MessagesState no es una clase normal, es un TypeDict, basicamente es un tipado del diccionario que vamos a crear usando esta clase.Mira la linea 95, langraph crea por nosotros un diccionario usando esta clase como plantilla de lo que debe tener el diccionario
 # MessagesState ya trae el campo "messages" (la conversación). Le añadimos dos más.
@@ -53,7 +68,7 @@ class Estado(MessagesState):
     pregunta: str  # lo que escribe la persona, tal cual
     respuesta: str  # el texto final que se le muestra
     intencion: str  # "consulta" o "accion", la decide el nodo route
-    propuesta: dict  # la acción que propone el modelo: {"accion": ..., "detalles": ...}, o None si no la entendió
+    propuesta: dict  # la herramienta que propone el modelo y sus datos: {"herramienta": ..., "argumentos": {...}}, o None si no propone nada
     aprobada: bool  # True si la persona dijo que sí en approval_gate
 
 
@@ -69,12 +84,6 @@ class Clasificacion(BaseModel):
     motivo: str = Field(description="Una frase corta que explique por qué has elegido esa intención.")
 
 
-# La segunda ficha, cuando la persona pide una acción, el modelo no la hace, rellena esta propuesta para que la persona la apruebe o la rechace
-class PropuestaDeAccion(BaseModel):
-    accion: str = Field(description="Qué hay que hacer, en pocas palabras: 'enviar correo', 'crear evento', 'mover evento' o 'borrar evento'.")
-    detalles: str = Field(description="Todos los datos necesarios para hacerlo, en una o dos frases: a quién, qué texto, qué día y a qué hora...")
-
-
 
 
 # ----------------------------------------------------------------
@@ -86,30 +95,50 @@ INSTRUCCIONES_DE_CLASIFICACION = (
 )
 
 INSTRUCCIONES_DE_PROPUESTA = (
-    "La persona te ha pedido una acción. No la hagas: describe en la ficha qué harías exactamente, "
-    "para que ella lo apruebe antes. Usa la conversación para completar los datos que falten."
+    "La persona te ha pedido una acción. Propónla llamando a UNA herramienta que cambie algo "
+    "(create_draft, create_event, move_event o delete_event): no se ejecutará hasta que la persona la apruebe. "
+    "Si te faltan datos, usa antes las herramientas de lectura (por ejemplo search_emails para saber la dirección "
+    "o el id del correo al que respondes, o list_events para saber el id del evento que hay que mover o borrar). "
+    "Si aun así falta algo que solo sabe la persona, no llames a ninguna herramienta y pregúntaselo."
 )
 
-# Respuestas fijas del camino de acción
-TEXTO_PROPUESTA_NO_ENTENDIDA = "No he entendido qué quieres que haga. ¿Me lo puedes decir con más detalle?"
-TEXTO_ACCION_RECHAZADA = "Vale, no hago nada."
+# Herramientas que cambian algo en tu cuenta. El agente nunca las recibe y el nodo tools se niega a ejecutarlas
+HERRAMIENTAS_DE_ESCRITURA = ["create_draft", "send_draft", "create_event", "move_event", "delete_event"]
+
+# De ellas, las que el modelo puede proponer en propose. send_draft no esta,solo la usa execute después de tu sí
+HERRAMIENTAS_QUE_SE_PUEDEN_PROPONER = ["create_draft", "create_event", "move_event", "delete_event"]
+
+# Respuesta fija cuando dices que no
+TEXTO_ACCION_RECHAZADA = "Vale, no lo hago. Si había un borrador, se queda guardado por si quieres usarlo."
+
+# Lo que recibe el modelo si pide una herramienta de escritura fuera de propose
+TEXTO_ESCRITURA_NO_PERMITIDA = "No permitido: esta herramienta solo se usa después de que la persona apruebe una propuesta."
 
 
 
-# fecha_fija: solo para evals y tests, que usan la agenda de prueba (semana del 2 de noviembre de 2026). Si no se pasa, el asistente usa la fecha real de cada día.
+# fecha_fija, solo para evals y tests, que usan la agenda de prueba (semana del 2 de noviembre de 2026). Si no se pasa, el asistente usa la fecha real de cada día.
 # memoria - dónde se guardan las conversaciones (ver memoria.py). Si no se pasa, se guardan en RAM, como en los tests.
 def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
     # Recibimos el modelo y las herramientas desde fuera. Las herramientas vienen de los
     # servidores MCP (ver cliente_mcp.py) y son una lista.
-    # Le bindeamos las herramientas al modelo (bind_tools() recibe una lista)
-    modelo_con_herramientas = modelo.bind_tools(herramientas)
+    # Separamos las herramientas en dos listas: las de lectura (las puede usar el agente) y las que el modelo puede proponer (solo en propose)
+    herramientas_de_lectura = []
+    herramientas_para_proponer = []
+    for herramienta in herramientas:
+        if herramienta.name in HERRAMIENTAS_QUE_SE_PUEDEN_PROPONER:
+            herramientas_para_proponer.append(herramienta)
+        if herramienta.name not in HERRAMIENTAS_DE_ESCRITURA:
+            herramientas_de_lectura.append(herramienta)
+
+    # Le bindeamos al modelo solo las de lectura (bind_tools() recibe una lista). Así el agente ni siquiera sabe que existen las de escritura
+    modelo_con_herramientas = modelo.bind_tools(herramientas_de_lectura)
+
+    # En propose el modelo ve las de lectura (para buscar lo que le falte) y las que puede proponer. Las puede PEDIR, pero quien decide si se ejecutan es el grafo, no él
+    modelo_para_proponer = modelo.bind_tools(herramientas_de_lectura + herramientas_para_proponer)
 
 # with_structured_output prepara una versión del modelo que, en vez de un mensaje, devuelve una ficha Clasificacion ya rellenada y comprobada por Pydantic. 
     # Por dentro usa el tool calling, le da al modelo una "herramienta" llamada Clasificacion y le obliga a usarla. Los argumentos que el modelo rellena son la ficha.
     clasificador = modelo.with_structured_output(Clasificacion)
-
-    # Lo mismo con la segunda ficha: el modelo devuelve una PropuestaDeAccion en vez de un mensaje
-    proponedor = modelo.with_structured_output(PropuestaDeAccion)
 
     # Devuelve la fecha que usa el asistente como "hoy". La usan agent y propose. fecha_fija es una variable que usan los evals para que el agente crea que dia es hoy, el dia nos lo inventaremos
     def calcular_fecha_de_hoy():
@@ -169,33 +198,83 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
             return "agent"
 
     # Si la pregunta del usuario requiere de una accion por parte de el agente, se ejecuta este nodo. Si es una consulta se ejecuta directamente el nodo de agent.
+    # La propuesta es una llamada a herramienta (tool calling), el modelo pide, por ejemplo, create_draft con sus datos. Pero aquí NO se ejecuta, solo se apunta
     async def propose(estado):
-        # Le pasamos toda la conversación, por si la persona dice algo como "bórralo" refiriéndose a un evento del que hablabais antes
+        # Le pasamos toda la conversación, por si la persona dice algo como "contéstale" refiriéndose a un correo del que hablabais antes
         instrucciones = crear_instrucciones(calcular_fecha_de_hoy()) + " " + INSTRUCCIONES_DE_PROPUESTA
         mensajes = [SystemMessage(instrucciones)]
         for mensaje in estado["messages"]:
             mensajes.append(mensaje)
 
-        # Igual que en route, si la ficha no es válida o no llega, no seguimos. Aquí no hay un camino "seguro" al que ir, así que le pedimos más detalle a la persona
-        try:
-            ficha = await proponedor.ainvoke(mensajes)
-        except (ValidationError, OutputParserException) as error:
-            print("El modelo devolvió una propuesta no válida:", error)
-            ficha = None
+        respuesta = await modelo_para_proponer.ainvoke(mensajes)
 
-        if ficha is None:
-            return {
-                "propuesta": None,
-                "messages": [AIMessage(TEXTO_PROPUESTA_NO_ENTENDIDA)],
-                "respuesta": TEXTO_PROPUESTA_NO_ENTENDIDA,
-            }
+        # Buscamos, entre lo que pide el modelo, la primera herramienta que se puede proponer. Las de lectura las ejecutará el nodo tools
+        propuesta = None
+        for llamada in respuesta.tool_calls:
+            if llamada["name"] in HERRAMIENTAS_QUE_SE_PUEDEN_PROPONER and propuesta is None:
+                propuesta = {"herramienta": llamada["name"], "argumentos": llamada["args"]}
 
-        propuesta = {"accion": ficha.accion, "detalles": ficha.detalles}
-        print("Propuesta:", propuesta)
-        return {"propuesta": propuesta}
+        if propuesta is not None:
+            print("Propuesta:", propuesta)
 
-    # Se ejecuta después de propose, si hay propuesta, pedimos aprobación. Si no, terminamos 
+        # La respuesta del modelo se añade a la conversación. La propuesta se guarda aparte, como un diccionario normal, para que se guarde sin problemas en la memoria mientras el grafo espera tu respuesta
+        return {"messages": [respuesta], "propuesta": propuesta}
+
+    # Se ejecuta después de propose y decide a qué nodo ir
     def siguiente_tras_propose(estado):
+        ultimo_mensaje = estado["messages"][-1]
+        if estado["propuesta"] is not None:
+            return "prepare"  # hay propuesta, la preparamos y pedimos aprobación
+        elif len(ultimo_mensaje.tool_calls) > 0:
+            return "tools"  # quiere leer algo antes de proponer (por ejemplo, buscar el correo de Laura)
+        else:
+            return "respond"  # no propone nada: te contesta con texto (por ejemplo, para preguntarte un dato)
+
+    # Prepara, sin riesgo, lo que se pueda antes de preguntarte.
+    # Para un correo crea el borrador, no se envía, pero así puedes verlo en Gmail tal cual saldría.
+    # Para mover o borrar un evento, lee cómo es ahora, el modelo solo da un id y tú tienes que ver que evento vas a cambiar antes de aprobar
+    async def prepare(estado):
+        propuesta = estado["propuesta"]
+        herramienta = propuesta["herramienta"]
+
+        # Copiamos la propuesta y le iremos añadiendo datos (un campo del estado se sustituye entero, no se mezcla)
+        propuesta_preparada = {
+            "herramienta": herramienta,
+            "argumentos": propuesta["argumentos"],
+        }
+
+        try:
+            if herramienta == "create_draft":
+                resultado = await herramientas_por_nombre["create_draft"].ainvoke(propuesta["argumentos"])
+                # El resultado de una herramienta MCP es una lista de bloques de texto. create_draft devuelve solo el id del borrador, que está en el texto del primer bloque
+                propuesta_preparada["id_borrador"] = resultado[0]["text"]
+                print("Borrador creado:", propuesta_preparada["id_borrador"])
+
+            if herramienta == "move_event" or herramienta == "delete_event":
+                id_evento = propuesta["argumentos"]["id_evento"]
+                resultado = await herramientas_por_nombre["get_event"].ainvoke({"id_evento": id_evento})
+
+                # get_event devuelve el evento en JSON, json.loads lo convierte en un diccionario para poder mirar sus campos
+                evento = json.loads(resultado[0]["text"])
+
+                # Si el id no existe (por ejemplo, el modelo se lo ha inventado), paramos aquí
+                if "error" in evento:
+                    cambios = cerrar_propuesta(estado, "No he encontrado ese evento: " + evento["error"])
+                    cambios["propuesta"] = None
+                    return cambios
+
+                propuesta_preparada["evento_actual"] = evento["titulo"] + ", " + evento["fecha"] + " de " + evento["inicio"] + " a " + evento["fin"]
+        except Exception as error:
+            # Si Google falla (por ejemplo, la sesión ha caducado), no seguimos, cerramos la propuesta contándote el error
+            print("Error al preparar la propuesta:", error)
+            cambios = cerrar_propuesta(estado, "No he podido preparar la acción: " + str(error))
+            cambios["propuesta"] = None
+            return cambios
+
+        return {"propuesta": propuesta_preparada}
+
+    # Si prepare ha fallado, la propuesta ya no existe y terminamos. Si no, pedimos aprobación
+    def siguiente_tras_prepare(estado):
         if estado["propuesta"] is None:
             return END
         else:
@@ -218,20 +297,29 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
         else:
             return "reject"
 
-    # De momento solo imprime lo que haria, sigo en un futuro con ella
-    def execute(estado):
+    # El único nodo que hace cambios de verdad, y solo se llega a él pasando por approval_gate con un sí
+    async def execute(estado):
         propuesta = estado["propuesta"]
-        print("[PRUEBA] Aquí se ejecutaría:", propuesta["accion"], "-", propuesta["detalles"])
 
-        texto = "Hecho (de prueba, todavía no cambio nada de verdad): " + propuesta["accion"] + ". " + propuesta["detalles"]
-        return {"messages": [AIMessage(texto)], "respuesta": texto}
+        try:
+            if propuesta["herramienta"] == "create_draft":
+                # El borrador ya existe (lo creó prepare), solo falta enviarlo
+                await herramientas_por_nombre["send_draft"].ainvoke({"id_borrador": propuesta["id_borrador"]})
+                texto = "Hecho: he enviado el correo a " + propuesta["argumentos"]["para"] + "."
+            else:
+                # En el calendario, la herramienta propuesta es la que hace el cambio, la ejecutamos tal cual con sus argumentos. Devuelve una frase como "Evento creado: ..."
+                resultado = await herramientas_por_nombre[propuesta["herramienta"]].ainvoke(propuesta["argumentos"])
+                texto = "Hecho. " + resultado[0]["text"]
+        except Exception as error:
+            print("Error al ejecutar la acción:", error)
+            texto = "No he podido hacerlo: " + str(error)
+
+        print(texto)
+        return cerrar_propuesta(estado, texto)
 
     # La persona dijo que no
     def reject(estado):
-        return {
-            "messages": [AIMessage(TEXTO_ACCION_RECHAZADA)],
-            "respuesta": TEXTO_ACCION_RECHAZADA,
-        }
+        return cerrar_propuesta(estado, TEXTO_ACCION_RECHAZADA)
 
     # Llama al modelo con las instrucciones y toda la conversación.
     # Las instrucciones no se guardan en el estado,se añaden en cada llamada.
@@ -268,11 +356,15 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
             # }
             print("El modelo pide:", llamada["name"], "con", llamada["args"])
 
-            herramienta = herramientas_por_nombre[llamada["name"]]
+            # Segunda barrera: aunque el modelo pida una herramienta de escritura (no la tiene, pero podría inventarse el nombre), aquí nunca se ejecuta
+            if llamada["name"] in HERRAMIENTAS_DE_ESCRITURA:
+                resultado = TEXTO_ESCRITURA_NO_PERMITIDA
+            else:
+                herramienta = herramientas_por_nombre[llamada["name"]]
 
-            # Las herramientas MCP son asíncronas: await espera a que el servidor MCP
-            # ejecute la herramienta y nos devuelva el resultado.
-            resultado = await herramienta.ainvoke(llamada["args"])
+                # Las herramientas MCP son asíncronas: await espera a que el servidor MCP
+                # ejecute la herramienta y nos devuelva el resultado.
+                resultado = await herramienta.ainvoke(llamada["args"])
             print("Resultado de la herramienta:", resultado)
 
             # tool_call_id indica a qué petición responde este resultado.
@@ -296,6 +388,13 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
         else:
             return "respond"
 
+    # tools lo usan agent y propose: después de leer, volvemos al que lo pidió
+    def siguiente_tras_tools(estado):
+        if estado["intencion"] == "accion":
+            return "propose"
+        else:
+            return "agent"
+
     # -------------------------------------------------------------------
     # Montamos el grafo: primero los nodos, después las flechas
 
@@ -303,6 +402,7 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
     grafo.add_node("ingest", ingest)
     grafo.add_node("route", route)
     grafo.add_node("propose", propose)
+    grafo.add_node("prepare", prepare)
     grafo.add_node("approval_gate", approval_gate)
     grafo.add_node("execute", execute)
     grafo.add_node("reject", reject)
@@ -313,12 +413,13 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
     grafo.add_edge(START, "ingest")
     grafo.add_edge("ingest", "route")
     grafo.add_conditional_edges("route", siguiente_tras_route)  # a "agent" o a "propose"
-    grafo.add_conditional_edges("propose", siguiente_tras_propose)  # a "approval_gate" o a END
+    grafo.add_conditional_edges("propose", siguiente_tras_propose)  # a "prepare", "tools" o "respond"
+    grafo.add_conditional_edges("prepare", siguiente_tras_prepare)  # a "approval_gate" o a END
     grafo.add_conditional_edges("approval_gate", siguiente_tras_approval_gate)  # a "execute" o a "reject"
     grafo.add_edge("execute", END)
     grafo.add_edge("reject", END)
     grafo.add_conditional_edges("agent", siguiente_paso)  # a "tools" o a "respond"
-    grafo.add_edge("tools", "agent")  # después de ejecutar, el modelo vuelve a pensar,esto con el anterior genera un bucle donde se pueden pedir herramientas hasta que se consiga la respuesta
+    grafo.add_conditional_edges("tools", siguiente_tras_tools)  # vuelve a "agent" o a "propose": el modelo vuelve a pensar, y así se pueden pedir herramientas hasta tener lo necesario
     grafo.add_edge("respond", END)
 
     # -------------------------------------------------------------------
