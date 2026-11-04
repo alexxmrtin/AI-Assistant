@@ -1,4 +1,4 @@
-#   START → ingest → route → (¿consulta o acción?)
+#   START → ingest → summarize → route → (¿consulta o acción?)
 #                              consulta → agent → (¿pide herramientas?) → tools → agent → ... → respond → END
 #                              accion   → propose ⇄ tools (si necesita leer algo antes de proponer)
 #                                         propose → prepare → approval_gate → (¿sí o no?) → execute → END
@@ -10,7 +10,14 @@ import json
 from datetime import date
 
 from langchain_core.exceptions import OutputParserException  # no se pudo leer al modelo
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.types import interrupt
@@ -61,6 +68,46 @@ def cerrar_propuesta(estado, texto):
     return {"messages": mensajes, "respuesta": texto}
 
 
+# Si la conversación se ha resumido (ver el nodo summarize), añade el resumen al final de las instrucciones del sistema, así el modelo sigue sabiendo lo que se habló antes aunque ya no reciba esos mensajes
+def agregar_resumen(instrucciones, estado):
+    if "resumen" in estado and estado["resumen"] != "":
+        return instrucciones + "\n\nResumen de la parte antigua de la conversación, " + estado["resumen"]
+    else:
+        return instrucciones
+
+
+# Devuelve la posición donde empieza la parte reciente de la conversación, que es la pregunta número "preguntas_que_se_mantienen" contando desde el final. Lo que hay antes es la parte antigua
+# Cortamos siempre justo antes de una pregunta tuya, así nunca separamos una petición de herramienta (AIMessage con tool_calls) de su respuesta (ToolMessage), que tienen que ir juntas
+def buscar_inicio_de_lo_reciente(mensajes, preguntas_que_se_mantienen):
+    preguntas_vistas = 0
+    posicion = len(mensajes) - 1
+    while posicion >= 0:
+        if mensajes[posicion].type == "human":
+            preguntas_vistas = preguntas_vistas + 1
+            if preguntas_vistas == preguntas_que_se_mantienen:
+                return posicion
+        posicion = posicion - 1
+
+    # No hay tantas preguntas, todo es reciente
+    return 0
+
+
+# Convierte los mensajes en un texto normal para pedir el resumen. .text saca el texto de cualquier mensaje, también de los resultados de herramientas, que vienen en bloques
+def convertir_en_texto(mensajes):
+    texto = ""
+    for mensaje in mensajes:
+        if mensaje.type == "human":
+            texto = texto + "Persona, " + mensaje.text + "\n"
+        elif mensaje.type == "tool":
+            texto = texto + "Resultado de la herramienta, " + mensaje.text + "\n"
+        else:
+            if mensaje.text != "":
+                texto = texto + "Asistente, " + mensaje.text + "\n"
+            for llamada in mensaje.tool_calls:
+                texto = texto + "El asistente usa la herramienta " + llamada["name"] + " con " + str(llamada["args"]) + "\n"
+    return texto
+
+
 # El estado es la información que viaja de un nodo a otro.Creamos una clase que hereda de la clase MessagesState que importamos.
 # IMPORTANTE, MessagesState no es una clase normal, es un TypeDict, basicamente es un tipado del diccionario que vamos a crear usando esta clase.Mira la linea 95, langraph crea por nosotros un diccionario usando esta clase como plantilla de lo que debe tener el diccionario
 # MessagesState ya trae el campo "messages" (la conversación). Le añadimos dos más.
@@ -70,6 +117,7 @@ class Estado(MessagesState):
     intencion: str  # "consulta" o "accion", la decide el nodo route
     propuesta: dict  # la herramienta que propone el modelo y sus datos: {"herramienta": ..., "argumentos": {...}}, o None si no propone nada
     aprobada: bool  # True si la persona dijo que sí en approval_gate
+    resumen: str  # el resumen de la parte antigua de la conversación, lo escribe el nodo summarize
 
 
 # Salida estructurada, en vez de pedirle al modelo un texto libre ("creo que es una consulta porque..."), le pedimos que rellene esta ficha con dos campos fijos
@@ -102,6 +150,18 @@ INSTRUCCIONES_DE_PROPUESTA = (
     "Si aun así falta algo que solo sabe la persona, no llames a ninguna herramienta y pregúntaselo."
 )
 
+# Presupuesto de contexto (ver el nodo summarize). Si la conversación pasa de estos tokens, la parte antigua se resume
+PRESUPUESTO_DE_TOKENS = 8000
+
+# Cuántas preguntas tuyas (cada una con todo lo que vino después) se mandan siempre enteras al modelo, aunque se pase del presupuesto
+PREGUNTAS_QUE_SE_MANTIENEN = 3
+
+INSTRUCCIONES_DE_RESUMEN = (
+    "Resume esta conversación entre una persona y su asistente personal en un párrafo corto. "
+    "Conserva los datos que puedan hacer falta después, nombres, direcciones de correo, fechas, horas, "
+    "ids de correos y de eventos, y lo que se decidió. Si hay un resumen anterior, intégralo en el nuevo."
+)
+
 # Herramientas que cambian algo en tu cuenta. El agente nunca las recibe y el nodo tools se niega a ejecutarlas
 HERRAMIENTAS_DE_ESCRITURA = ["create_draft", "send_draft", "create_event", "move_event", "delete_event"]
 
@@ -118,7 +178,8 @@ TEXTO_ESCRITURA_NO_PERMITIDA = "No permitido: esta herramienta solo se usa despu
 
 # fecha_fija, solo para evals y tests, que usan la agenda de prueba (semana del 2 de noviembre de 2026). Si no se pasa, el asistente usa la fecha real de cada día.
 # memoria - dónde se guardan las conversaciones (ver memoria.py). Si no se pasa, se guardan en RAM, como en los tests.
-def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
+# presupuesto_de_tokens, los tests lo bajan para no tener que escribir conversaciones enormes
+def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None, presupuesto_de_tokens=PRESUPUESTO_DE_TOKENS):
     # Recibimos el modelo y las herramientas desde fuera. Las herramientas vienen de los
     # servidores MCP (ver cliente_mcp.py) y son una lista.
     # Separamos las herramientas en dos listas: las de lectura (las puede usar el agente) y las que el modelo puede proponer (solo en propose)
@@ -163,6 +224,47 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
         return {"messages": [HumanMessage(pregunta_limpia)]}
 
 
+    # Presupuesto de contexto. Cada vez que llamamos al modelo le mandamos TODA la conversación, y cada token se paga y ocupa sitio en su ventana de contexto
+    # Si la conversación pasa del presupuesto, la parte antigua se resume en un párrafo y se borra del estado. Lo reciente se queda tal cual
+    async def summarize(estado):
+        mensajes = estado["messages"]
+        # count_tokens_approximately calcula los tokens a partir del número de letras (unas 4 letras por token). No es exacto, pero no necesita llamar a nadie ni instalar nada
+        tokens = count_tokens_approximately(mensajes)
+        print("Tokens de la conversación (aprox.):", tokens)
+
+        if tokens <= presupuesto_de_tokens:
+            return {}  # cabe, no cambiamos nada
+
+        inicio = buscar_inicio_de_lo_reciente(mensajes, PREGUNTAS_QUE_SE_MANTIENEN)
+        if inicio == 0:
+            return {}  #tdo es reciente, no hay nada antiguo que resumir
+
+        mensajes_antiguos = []
+        for posicion in range(inicio):
+            mensajes_antiguos.append(mensajes[posicion])
+
+        # El resumen nuevo incluye el anterior, si lo había, así no se pierde nada de lo que se resumió otras veces
+        texto = ""
+        if "resumen" in estado and estado["resumen"] != "":
+            texto = "Resumen anterior, " + estado["resumen"] + "\n\n"
+        texto = texto + convertir_en_texto(mensajes_antiguos)
+
+        # Usamos el modelo sin herramientas, solo tiene que escribir. Si falla, seguimos sin resumir, mejor gastar más tokens que perder la conversación
+        try:
+            respuesta = await modelo.ainvoke([SystemMessage(INSTRUCCIONES_DE_RESUMEN), HumanMessage(texto)])
+        except Exception as error:
+            print("No he podido resumir la conversación:", error)
+            return {}
+
+        # RemoveMessage le dice a LangGraph que borre del estado el mensaje con ese id. Cada mensaje tiene un id que le pone LangGraph al guardarlo
+        borrar = []
+        for mensaje in mensajes_antiguos:
+            borrar.append(RemoveMessage(id=mensaje.id))
+
+        print("Resumidos", len(mensajes_antiguos), "mensajes antiguos")
+        return {"resumen": respuesta.text, "messages": borrar}
+
+
     # Decide si el mensaje es una consulta o una acción, para elegir el camino del grafo.
     async def route(estado):
         # Solo le pasamos el mensaje nuevo, no toda la conversación
@@ -202,7 +304,7 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
     async def propose(estado):
         # Le pasamos toda la conversación, por si la persona dice algo como "contéstale" refiriéndose a un correo del que hablabais antes
         instrucciones = crear_instrucciones(calcular_fecha_de_hoy()) + " " + INSTRUCCIONES_DE_PROPUESTA
-        mensajes = [SystemMessage(instrucciones)]
+        mensajes = [SystemMessage(agregar_resumen(instrucciones, estado))]
         for mensaje in estado["messages"]:
             mensajes.append(mensaje)
 
@@ -331,7 +433,7 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
         
         fecha_de_hoy = calcular_fecha_de_hoy()
 
-        mensajes = [SystemMessage(crear_instrucciones(fecha_de_hoy))]
+        mensajes = [SystemMessage(agregar_resumen(crear_instrucciones(fecha_de_hoy), estado))]
         for mensaje in estado["messages"]:
             mensajes.append(mensaje)
 
@@ -400,6 +502,7 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
 
     grafo = StateGraph(Estado)
     grafo.add_node("ingest", ingest)
+    grafo.add_node("summarize", summarize)
     grafo.add_node("route", route)
     grafo.add_node("propose", propose)
     grafo.add_node("prepare", prepare)
@@ -411,7 +514,8 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None):
     grafo.add_node("respond", respond)
 
     grafo.add_edge(START, "ingest")
-    grafo.add_edge("ingest", "route")
+    grafo.add_edge("ingest", "summarize")
+    grafo.add_edge("summarize", "route")
     grafo.add_conditional_edges("route", siguiente_tras_route)  # a "agent" o a "propose"
     grafo.add_conditional_edges("propose", siguiente_tras_propose)  # a "prepare", "tools" o "respond"
     grafo.add_conditional_edges("prepare", siguiente_tras_prepare)  # a "approval_gate" o a END

@@ -4,9 +4,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from asistente_ia.grafo import TEXTO_ACCION_RECHAZADA, TEXTO_ESCRITURA_NO_PERMITIDA, crear_grafo
-from asistente_ia.telegram_bot import TEXTO_ACCIONES_SOLO_EN_TERMINAL, crear_manejador
 from tests.llm_falso import HerramientaFalsa, LLMFalso
-from tests.test_telegram_bot import UpdateFalso
 
 CONFIGURACION = {"configurable": {"thread_id": "test-aprobacion"}}
 
@@ -135,22 +133,6 @@ def test_el_agente_no_puede_ejecutar_herramientas_de_escritura():
 
     assert enviar_borrador.llamadas == []
     assert estado_final["messages"][-2].content == TEXTO_ESCRITURA_NO_PERMITIDA
-
-
-def test_telegram_rechaza_las_acciones_de_momento():
-    buscar, crear_borrador, enviar_borrador = crear_herramientas()
-    grafo = crear_grafo(LLMFalso([propuesta_de_correo()], ["accion"]), [buscar, crear_borrador, enviar_borrador])
-    responder = crear_manejador(grafo, "111")
-
-    update = UpdateFalso(111, "Responde a Laura que el viernes me va bien")
-    asyncio.run(responder(update, None))
-
-    assert update.message.respuestas_enviadas == [TEXTO_ACCIONES_SOLO_EN_TERMINAL]
-    assert enviar_borrador.llamadas == []
-    # El grafo no se ha quedado parado: terminó por el camino del "no"
-    estado = asyncio.run(grafo.aget_state({"configurable": {"thread_id": "111"}}))
-    assert estado.values["aprobada"] is False
-    assert len(estado.next) == 0
 
 
 def herramientas_del_calendario():

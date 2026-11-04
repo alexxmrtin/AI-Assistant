@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # De dónde lee los eventos el servidor MCP del calendario: demo o google.
     calendar_backend: str = "demo"
 
-    # De dónde lee los correos el servidor MCP del correo: demo o google.
+    # De dónde lee los correos el servidor MCP del correo: demo, trampas (la de prueba más los correos trampa, ver ataques.py) o google.
     correo_backend: str = "demo"
 
     # Dónde está la base de datos Postgres que guarda las conversaciones. Vacía = en RAM (se pierden al cerrar).

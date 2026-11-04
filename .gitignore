@@ -16,3 +16,10 @@ wheels/
 # Secretos: nunca al repo
 .env
 secrets/
+
+# Notas personales
+POR_REPASAR.md
+
+# Fuera hasta la v1.0
+asistente_ia/ataques.py
+tests/test_ataques.py
