@@ -9,6 +9,7 @@ langchain-core==1.7.3
 langchain-anthropic==1.7.7
 langchain-google-genai==4.4.2
 langchain-ollama==1.1.0
+langchain-groq==1.1.3
 
 # Orquestación: el grafo del asistente
 langgraph==1.2.18

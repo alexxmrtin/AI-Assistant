@@ -23,3 +23,8 @@ def test_proveedor_desconocido_da_error():
 def test_crea_el_modelo_del_proveedor_elegido():
     settings = Settings(_env_file=None, llm_provider="anthropic", anthropic_api_key="sk-falsa")
     assert type(crear_llm("fast", settings)).__name__ == "ChatAnthropic"
+
+
+def test_crea_el_modelo_de_groq():
+    settings = Settings(_env_file=None, llm_provider="groq", groq_api_key="gsk-falsa")
+    assert type(crear_llm("fast", settings)).__name__ == "ChatGroq"

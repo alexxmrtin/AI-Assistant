@@ -9,11 +9,12 @@ class Settings(BaseSettings):
     # Lee también el fichero .env e ignora las variables que no aparezcan aquí.
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    llm_provider: str = "anthropic"  # anthropic, google u ollama
+    llm_provider: str = "anthropic"  # anthropic, google, ollama o groq
     llm_model_fast: str = ""  # vacío = el modelo por defecto del proveedor
     llm_model_smart: str = ""
     anthropic_api_key: str = ""
     google_api_key: str = ""
+    groq_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
     # De dónde lee los eventos el servidor MCP del calendario: demo o google.
