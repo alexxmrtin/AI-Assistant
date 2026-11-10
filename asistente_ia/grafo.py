@@ -147,6 +147,7 @@ INSTRUCCIONES_DE_PROPUESTA = (
     "(create_draft, create_event, move_event o delete_event): no se ejecutará hasta que la persona la apruebe. "
     "Si te faltan datos, usa antes las herramientas de lectura (por ejemplo search_emails para saber la dirección "
     "o el id del correo al que respondes, o list_events para saber el id del evento que hay que mover o borrar). "
+    "Si para crear un evento no te dicen la hora de fin, pon que dura una hora y no lo preguntes. "
     "Si aun así falta algo que solo sabe la persona, no llames a ninguna herramienta y pregúntaselo."
 )
 
@@ -468,6 +469,10 @@ def crear_grafo(modelo, herramientas, fecha_fija=None, memoria=None, presupuesto
                 # ejecute la herramienta y nos devuelva el resultado.
                 resultado = await herramienta.ainvoke(llamada["args"])
             print("Resultado de la herramienta:", resultado)
+
+            # Si la herramienta no encuentra nada (por ejemplo, un día sin eventos) devuelve una lista vacía, y algunos proveedores como Groq rechazan un resultado vacío, así que le mandamos un texto que lo diga
+            if resultado == []:
+                resultado = "No hay resultados."
 
             # tool_call_id indica a qué petición responde este resultado.
             # El resultado de una herramienta MCP es una lista de bloques de texto, el formato

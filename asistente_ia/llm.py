@@ -11,7 +11,7 @@ MODELOS_POR_DEFECTO = {
     "anthropic": {"fast": "claude-haiku-5-5", "smart": "claude-sonnet-5-5"},
     "google": {"fast": "gemini-2.5-flash", "smart": "gemini-2.5-pro"},
     "ollama": {"fast": "qwen3:8b", "smart": "qwen3:8b"},
-    "groq": {"fast": "llama-3.3-70b-versatile", "smart": "llama-3.3-70b-versatile"},
+    "groq": {"fast": "openai/gpt-oss-120b", "smart": "openai/gpt-oss-120b"},
 }
 
 
